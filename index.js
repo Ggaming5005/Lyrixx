@@ -5,6 +5,21 @@ const app = express();
 
 const cookie = process.env.COOKIE;
 
+// Check for required environment variables
+const requiredEnv = [
+  "TOKEN_URL",
+  "LYRICS_BASE_URL",
+  "SEARCH_TOKEN",
+  "SEARCH_URL",
+  "CLIENT_ID",
+  "CLIENT_SECRET",
+];
+const missingEnv = requiredEnv.filter((env) => !process.env[env]);
+if (missingEnv.length) {
+  console.error("Missing environment variables:", missingEnv.join(", "));
+  process.exit(1);
+}
+
 // Middleware for setting CORS headers for all responses
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
@@ -23,7 +38,11 @@ app.get("/key", (req, res) => {
 });
 
 app.get("/getLyrics/:trackId", (req, res) => {
+  console.log("=== /getLyrics Request Received ===");
+  console.log("Track ID:", req.params.trackId);
+
   // First request: Retrieve access token and client info
+  console.log("Fetching token from:", process.env.TOKEN_URL);
   request.get(
     {
       url: process.env.TOKEN_URL,
@@ -38,6 +57,10 @@ app.get("/getLyrics/:trackId", (req, res) => {
         console.error("Token request error:", tokenErr);
         return res.status(500).send(tokenErr);
       }
+      if (!tokenBody) {
+        console.error("Empty token body received.");
+        return res.status(500).send("Empty token body");
+      }
       let tokenJson;
       try {
         tokenJson = JSON.parse(tokenBody);
@@ -46,12 +69,17 @@ app.get("/getLyrics/:trackId", (req, res) => {
         return res.status(500).send("Error parsing token response");
       }
       const accessToken = tokenJson.accessToken;
+      if (!accessToken) {
+        console.error("Access token not found in token response");
+        return res.status(500).send("Access token not found");
+      }
       console.log("Access Token:", accessToken);
 
       // Second request: Get lyrics using the access token
       const lyricsUrl =
         process.env.LYRICS_BASE_URL +
         `${req.params.trackId}?format=json&vocalRemoval=false&market=from_token`;
+      console.log("Fetching lyrics from:", lyricsUrl);
       request.get(
         {
           url: lyricsUrl,
@@ -65,9 +93,17 @@ app.get("/getLyrics/:trackId", (req, res) => {
             console.error("Lyrics request error:", lyricsErr);
             return res.status(500).send(lyricsErr);
           }
+          if (!lyricsBody) {
+            console.error("Empty lyrics body received.");
+            return res.status(500).send("Empty lyrics body");
+          }
           console.log("Lyrics Response Body:", lyricsResponse.body);
           try {
             const lyricsJson = JSON.parse(lyricsResponse.body);
+            if (!lyricsJson) {
+              console.error("Parsed lyrics JSON is empty");
+              return res.status(500).send("No lyrics found");
+            }
             res.send(JSON.stringify(lyricsJson, null, 2));
           } catch (parseError) {
             console.error("Error parsing lyrics response:", parseError);
@@ -80,11 +116,15 @@ app.get("/getLyrics/:trackId", (req, res) => {
 });
 
 app.get("/getLyricsByName/:musician/:track", (req, res) => {
+  console.log("=== /getLyricsByName Request Received ===");
+  console.log("Musician:", req.params.musician, "Track:", req.params.track);
+
   const clientId = process.env.CLIENT_ID;
   const clientSecret = process.env.CLIENT_SECRET;
   const encoded = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
 
   // First request: Obtain a search access token
+  console.log("Fetching search token from:", process.env.SEARCH_TOKEN);
   request.post(
     {
       url: process.env.SEARCH_TOKEN,
@@ -101,6 +141,10 @@ app.get("/getLyricsByName/:musician/:track", (req, res) => {
         console.error("Search token request error:", tokenErr);
         return res.status(500).send(tokenErr);
       }
+      if (!tokenBody) {
+        console.error("Empty search token body received.");
+        return res.status(500).send("Empty search token body");
+      }
       let tokenJson;
       try {
         tokenJson = JSON.parse(tokenBody);
@@ -109,6 +153,11 @@ app.get("/getLyricsByName/:musician/:track", (req, res) => {
         return res.status(500).send("Error parsing search token response");
       }
       const accessToken = tokenJson.access_token;
+      if (!accessToken) {
+        console.error("Search access token not found in response");
+        return res.status(500).send("Search access token not found");
+      }
+      console.log("Search Access Token:", accessToken);
 
       // Build the search URL using URL encoding
       const searchUrl =
@@ -116,6 +165,7 @@ app.get("/getLyricsByName/:musician/:track", (req, res) => {
         `${encodeURIComponent(
           req.params.musician
         )}%20track:${encodeURIComponent(req.params.track)}&type=track&limit=10`;
+      console.log("Fetching search results from:", searchUrl);
 
       // Second request: Search for the track by musician and track name
       request.get(
@@ -130,6 +180,10 @@ app.get("/getLyricsByName/:musician/:track", (req, res) => {
             console.error("Search request error:", searchErr);
             return res.status(500).send(searchErr);
           }
+          if (!searchBody) {
+            console.error("Empty search response body received.");
+            return res.status(500).send("Empty search response body");
+          }
           let searchJson;
           try {
             searchJson = JSON.parse(searchBody);
@@ -138,7 +192,11 @@ app.get("/getLyricsByName/:musician/:track", (req, res) => {
             return res.status(500).send("Error parsing search response");
           }
 
-          if (!searchJson.tracks.items.length) {
+          if (
+            !searchJson.tracks ||
+            !searchJson.tracks.items ||
+            !searchJson.tracks.items.length
+          ) {
             return res.status(404).send("No remix lyrics was found");
           }
 
