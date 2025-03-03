@@ -1,0 +1,431 @@
+/*----------------------------------------
+ * API Documentation CSS
+ * Version: 1.1
+ * Author: Your Name
+ * Description: Enhanced styling for API documentation pages with subtle green accents and a refined, less white background.
+------------------------------------------*/
+
+/*----------------------------------------
+ * Reset and Base Styles
+------------------------------------------*/
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: "Arial", sans-serif;
+  background-color: #e5e5e5; /* Slightly darker background to reduce white */
+  color: #333;
+  line-height: 1.6;
+  margin: 0;
+  padding: 0;
+}
+
+/*----------------------------------------
+ * Typography
+------------------------------------------*/
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-weight: 600;
+  line-height: 1.2;
+  margin-bottom: 1rem;
+}
+
+p {
+  margin-bottom: 1rem;
+  font-size: 1rem;
+  color: #555;
+}
+
+a {
+  color: #27ae60;
+  text-decoration: none;
+  transition: color 0.3s ease;
+}
+
+a:hover {
+  color: #1e8449;
+}
+
+/*----------------------------------------
+ * Header
+------------------------------------------*/
+header {
+  background-color: #dfe3e6; /* Off-white/light grey tone */
+  padding: 20px;
+  text-align: center;
+  border-bottom: 2px solid #27ae60;
+}
+
+header h1 {
+  font-size: 2.5rem;
+  margin-bottom: 0.5rem;
+  color: #333;
+}
+
+header p {
+  font-size: 1rem;
+  color: #666;
+}
+
+/*----------------------------------------
+ * Main Container
+------------------------------------------*/
+main {
+  max-width: 960px;
+  margin: 30px auto;
+  padding: 0 20px;
+}
+
+/*----------------------------------------
+ * Section Styling
+------------------------------------------*/
+section {
+  background-color: #f7f7f7; /* A softened off-white */
+  border: 1px solid #d0d0d0;
+  padding: 20px;
+  margin-bottom: 30px;
+  border-radius: 6px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+section:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+}
+
+section h2 {
+  color: #27ae60;
+  border-bottom: 1px solid #d0d0d0;
+  padding-bottom: 10px;
+  margin-bottom: 20px;
+}
+
+/*----------------------------------------
+ * Endpoints Section
+------------------------------------------*/
+#endpoints .endpoint {
+  margin-bottom: 25px;
+  padding: 15px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background-color: #e9e9e9; /* Muted background for endpoints */
+  transition: background-color 0.3s ease;
+}
+
+#endpoints .endpoint:hover {
+  background-color: #e1e1e1;
+}
+
+#endpoints h3 {
+  font-size: 1.5rem;
+  color: #27ae60;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+}
+
+#endpoints h3:before {
+  content: "📡";
+  margin-right: 8px;
+  font-size: 1.2rem;
+}
+
+/*----------------------------------------
+ * Preformatted Code Blocks
+------------------------------------------*/
+pre {
+  background-color: #e0e0e0; /* Softer than pure white */
+  padding: 15px;
+  border: 1px solid #bbb;
+  border-radius: 4px;
+  overflow-x: auto;
+  margin-bottom: 15px;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+code {
+  font-family: "Courier New", Courier, monospace;
+  background-color: #d8d8d8;
+  padding: 3px 6px;
+  border-radius: 3px;
+  border: 1px solid #aaa;
+  font-size: 0.9rem;
+  color: #333;
+}
+
+/*----------------------------------------
+ * HTTP Method Labels (sd)
+------------------------------------------*/
+sd {
+  font-size: 1rem;
+  font-weight: bold;
+  color: #27ae60;
+}
+
+/*----------------------------------------
+ * Lists for API Usage
+------------------------------------------*/
+ol,
+ul {
+  margin-left: 20px;
+  margin-bottom: 1rem;
+}
+
+li {
+  margin-bottom: 0.5rem;
+}
+
+/*----------------------------------------
+ * Contact Section
+------------------------------------------*/
+#contact {
+  text-align: center;
+  padding: 20px;
+}
+
+#contact h2 {
+  color: #27ae60;
+  font-size: 1.8rem;
+  margin-bottom: 10px;
+}
+
+#contact p {
+  font-size: 1rem;
+  color: #555;
+  margin-bottom: 20px;
+}
+
+/*----------------------------------------
+ * discord Link Button
+------------------------------------------*/
+.discord-link {
+  display: inline-block;
+  background-color: #28a745;
+  color: #fff;
+  padding: 10px 20px;
+  font-size: 1rem;
+  border-radius: 4px;
+  transition: background-color 0.3s ease, transform 0.2s ease;
+  text-decoration: none;
+  margin-top: 10px;
+}
+
+.discord-link:hover {
+  background-color: #218838;
+  transform: translateY(-2px);
+}
+
+/*----------------------------------------
+ * Footer
+------------------------------------------*/
+footer {
+  background-color: #dfe3e6;
+  border-top: 2px solid #27ae60;
+  text-align: center;
+  padding: 15px;
+  font-size: 0.9rem;
+  color: #777;
+}
+
+/*----------------------------------------
+ * Custom Scrollbar for Code Blocks
+------------------------------------------*/
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #ccc;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #999;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #888;
+}
+
+/*----------------------------------------
+ * Accordion for Endpoint Details (Optional)
+------------------------------------------*/
+.accordion {
+  background-color: #e7e7e7;
+  border: 1px solid #bbb;
+  border-radius: 4px;
+  margin-bottom: 15px;
+  overflow: hidden;
+  transition: max-height 0.3s ease;
+}
+
+.accordion-header {
+  padding: 10px 15px;
+  cursor: pointer;
+  background-color: #dfe3e6;
+  border-bottom: 1px solid #bbb;
+  display: flex;
+  align-items: center;
+}
+
+.accordion-header:hover {
+  background-color: #d0d0d0;
+}
+
+.accordion-header h3 {
+  flex: 1;
+  font-size: 1.3rem;
+  color: #27ae60;
+}
+
+.accordion-content {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease-out;
+  background-color: #e7e7e7;
+  padding: 0 15px;
+}
+
+.accordion-content.open {
+  padding: 15px;
+  max-height: 500px;
+}
+
+/*----------------------------------------
+ * Syntax Highlighting for Code Blocks
+------------------------------------------*/
+.token.comment {
+  color: #6a737d;
+  font-style: italic;
+}
+.token.keyword {
+  color: #d73a49;
+}
+.token.string {
+  color: #032f62;
+}
+.token.function {
+  color: #005cc5;
+}
+.token.number {
+  color: #e36209;
+}
+
+/*----------------------------------------
+ * Preformatted Code Blocks with Line Numbers
+------------------------------------------*/
+.pre-wrapper {
+  position: relative;
+  counter-reset: line;
+}
+
+.pre-wrapper pre {
+  padding-left: 50px;
+}
+
+.pre-wrapper pre code {
+  display: block;
+}
+
+.pre-wrapper pre code span.line {
+  display: block;
+  position: relative;
+  padding-left: 10px;
+}
+
+.pre-wrapper pre code span.line:before {
+  counter-increment: line;
+  content: counter(line);
+  position: absolute;
+  left: -40px;
+  width: 30px;
+  text-align: right;
+  color: #aaa;
+}
+
+/*----------------------------------------
+ * Utility Classes for Spacing and Layout
+------------------------------------------*/
+.mt-10 {
+  margin-top: 10px;
+}
+.mt-20 {
+  margin-top: 20px;
+}
+.mb-10 {
+  margin-bottom: 10px;
+}
+.mb-20 {
+  margin-bottom: 20px;
+}
+.p-10 {
+  padding: 10px;
+}
+.p-20 {
+  padding: 20px;
+}
+.rounded {
+  border-radius: 6px;
+}
+.shadow {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/*----------------------------------------
+ * Responsive Styles
+------------------------------------------*/
+@media screen and (max-width: 768px) {
+  header h1 {
+    font-size: 2rem;
+  }
+  header p {
+    font-size: 0.9rem;
+  }
+  main {
+    padding: 0 10px;
+  }
+  section {
+    padding: 15px;
+  }
+  .telegram-link {
+    font-size: 0.9rem;
+    padding: 8px 16px;
+  }
+  .pre-wrapper pre {
+    padding-left: 40px;
+  }
+}
+
+@media screen and (max-width: 480px) {
+  header h1 {
+    font-size: 1.8rem;
+  }
+  header p {
+    font-size: 0.85rem;
+  }
+  pre {
+    font-size: 0.8rem;
+  }
+}
+
+/*----------------------------------------
+ * End of API Documentation CSS
+------------------------------------------*/

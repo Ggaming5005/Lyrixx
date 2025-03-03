@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lyrix API Documentation</title>
+    <link rel="stylesheet" href="index.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Lyrix API</h1>
+      <p>
+        A Node.js API that extracts synced lyrics from Musixmatch via Spotify.
+      </p>
+      <p>
+        Check the source code for details. It's well-commented! Feel free to ask
+        any questions.
+      </p>
+    </header>
+
+    <main>
+      <section id="endpoints">
+        <h2>Endpoints</h2>
+
+        <div class="endpoint">
+          <h3>🔍 Search lyrics by Track ID</h3>
+          <pre><code>GET https://lyrix.vercel.app/getLyrics/{trackId}</code></pre>
+          <p>Retrieve lyrics using the Spotify Track ID.</p>
+          <strong>Example Request:</strong>
+          <pre><code>GET https://lyrix.vercel.app/getLyrics/123456789</code></pre>
+          <strong>Example Response:</strong>
+          <pre><code>{
+  "trackId": "123456789",
+  "title": "Lucid Dreams",
+  "artist": "Juice WRLD",
+  "lyrics": "I still see your shadows in my room..."
+}</code></pre>
+        </div>
+
+        <div class="endpoint">
+          <h3>🔍 Search lyrics by Artist & Track Name</h3>
+          <pre><code>GET https://lyrix.vercel.app/getLyricsByName/{artistName}/{trackName}?remix={true/false}</code></pre>
+          <p>Retrieve lyrics using the artist and track name.</p>
+          <p>
+            <strong>Optional:</strong> Add <code>?remix=true</code> to get only
+            official remix versions.
+          </p>
+          <strong>Example Request (Remix):</strong>
+          <pre><code>GET https://lyrix.vercel.app/getLyricsByName/JuiceWRLD/LucidDreams?remix=true</code></pre>
+          <strong>Example Request (Original):</strong>
+          <pre><code>GET https://lyrix.vercel.app/getLyricsByName/JuiceWRLD/LucidDreams</code></pre>
+          <strong>Example Response:</strong>
+          <pre><code>{
+  "trackName": "Lucid Dreams",
+  "artist": "Juice WRLD",
+  "isRemix": false,
+  "lyrics": "I still see your shadows in my room..."
+}</code></pre>
+        </div>
+      </section>
+
+      <section id="api-usage">
+        <h2>API Usage</h2>
+        <ol>
+          <li>
+            <strong>Get Lyrics by Track ID:</strong>
+            <ul>
+              <li>
+                Make a <code>GET</code> request to
+                <code>https://lyrix.vercel.app/getLyrics/{trackId}</code>.
+              </li>
+              <li>
+                Replace <code>{trackId}</code> with the actual Spotify Track ID.
+              </li>
+            </ul>
+          </li>
+          <li>
+            <strong>Get Lyrics by Artist & Track Name:</strong>
+            <ul>
+              <li>
+                Make a <code>GET</code> request to
+                <code
+                  >https://lyrix.vercel.app/getLyricsByName/{artistName}/{trackName}?remix={true/false}</code
+                >.
+              </li>
+              <li>
+                Replace <code>{artistName}</code> and
+                <code>{trackName}</code> accordingly.
+              </li>
+              <li>
+                Use <code>?remix=true</code> if looking for remix versions.
+              </li>
+            </ul>
+          </li>
+        </ol>
+      </section>
+
+      <section id="contact">
+        <h2>Contact</h2>
+        <p>
+          For more details, refer to the API documentation. If you have issues,
+          reach out via Discord:
+        </p>
+        <a
+          href="https://discord.com/users/687322874100580368"
+          target="_blank"
+          class="discord-link"
+          >Chat on Discord</a
+        >
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        For more details, check the API documentation or contact us at Discord
+        .gio._
+      </p>
+    </footer>
+  </body>
+</html>
