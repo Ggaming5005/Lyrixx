@@ -1,148 +1,180 @@
 const express = require("express");
-const axios = require("axios"); // using axios instead of the deprecated 'request'
+const request = require("request");
 const path = require("path");
 const app = express();
+
+const cookie = process.env.COOKIE;
 
 // Serve static files from the 'public' folder
 app.use(express.static(path.join(__dirname, "public")));
 
-// Route to serve the documentation/index page
+// Documentation endpoint
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
-// Dummy route to check server status
 app.get("/key", (req, res) => {
   res.send("success");
 });
 
-// Endpoint to fetch lyrics for a given track ID
-app.get("/getLyrics/:trackId", async (req, res) => {
-  try {
-    // First, obtain a token from your lyrics service
-    const tokenResponse = await axios.get(process.env.TOKEN_URL, {
+// Endpoint to get lyrics by track ID
+app.get("/getLyrics/:trackId", (req, res) => {
+  // First, get the token using the cookie and TOKEN_URL
+  request.get(
+    {
+      url: process.env.TOKEN_URL,
       headers: {
-        Cookie: process.env.COOKIE,
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
+        Cookie: cookie,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
       },
-    });
-    const { accessToken } = tokenResponse.data;
+    },
+    (error, response, body) => {
+      if (error) {
+        console.error("Error fetching token:", error);
+        return res.status(500).send(error);
+      }
+      let tokenData;
+      try {
+        tokenData = JSON.parse(body);
+      } catch (e) {
+        console.error("Error parsing token response:", e);
+        return res.status(500).send("Invalid token response");
+      }
+      const accessToken = tokenData.accessToken;
+      console.log("Access Token:", accessToken);
 
-    // Now call your lyrics API with the trackId
-    const lyricsResponse = await axios.get(
-      `${process.env.LYRICS_BASE_URL}${req.params.trackId}?format=json&vocalRemoval=false&market=from_token`,
-      {
-        headers: {
-          "app-platform": "WebPlayer",
-          Authorization: `Bearer ${accessToken}`,
+      // Use the token to fetch lyrics for the provided trackId
+      request.get(
+        {
+          url:
+            process.env.LYRICS_BASE_URL +
+            `${req.params.trackId}?format=json&vocalRemoval=false&market=from_token`,
+          headers: {
+            "app-platform": "WebPlayer",
+            Authorization: `Bearer ${accessToken}`,
+          },
         },
-      }
-    );
-    res.header("Access-Control-Allow-Origin", "*");
-    res.send(JSON.stringify(lyricsResponse.data, null, 2));
-  } catch (error) {
-    console.error(error);
-    res.status(500).send(error.toString());
-  }
-});
-
-// Endpoint to search for a track by musician and track name, then fetch lyrics
-app.get("/getLyricsByName/:musician/:track", async (req, res) => {
-  try {
-    // Client credentials to get Spotify access token for search
-    const clientId = process.env.CLIENT_ID;
-    const clientSecret = process.env.CLIENT_SECRET;
-    const encoded = Buffer.from(`${clientId}:${clientSecret}`).toString(
-      "base64"
-    );
-
-    const tokenResponse = await axios.post(
-      process.env.SEARCH_TOKEN,
-      "grant_type=client_credentials",
-      {
-        headers: {
-          Authorization: `Basic ${encoded}`,
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-      }
-    );
-    const accessToken = tokenResponse.data.access_token;
-
-    const searchUrl =
-      process.env.SEARCH_URL +
-      `${encodeURIComponent(req.params.musician)}%20track:${encodeURIComponent(
-        req.params.track
-      )}&type=track&limit=10`;
-
-    const searchResponse = await axios.get(searchUrl, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-
-    const tracks = searchResponse.data.tracks.items;
-    if (!tracks.length) {
-      return res.status(404).send("No track found");
-    }
-
-    let filteredTracks;
-    if (req.query.remix === "true") {
-      filteredTracks = tracks.filter((track) =>
-        track.name.toLowerCase().includes("remix")
-      );
-      if (!filteredTracks.length) {
-        filteredTracks = tracks.filter(
-          (track) => !track.name.toLowerCase().includes("remix")
-        );
-      }
-    } else {
-      filteredTracks = tracks.filter(
-        (track) => !track.name.toLowerCase().includes("remix")
+        (error, response, body) => {
+          if (error) {
+            console.error("Error fetching lyrics:", error);
+            return res.status(500).send(error);
+          }
+          res.header("Access-Control-Allow-Origin", "*");
+          try {
+            const lyricsData = JSON.parse(body);
+            res.send(JSON.stringify(lyricsData, null, 2));
+          } catch (e) {
+            console.error("Error parsing lyrics response:", e);
+            return res.status(500).send("Invalid lyrics response");
+          }
+        }
       );
     }
-
-    const realTrack = filteredTracks.sort(
-      (a, b) => b.popularity - a.popularity
-    )[0];
-    if (realTrack) {
-      console.log("Found track ID:", realTrack.id);
-      res.header("Access-Control-Allow-Origin", "*");
-      res.redirect(`/getLyrics/${realTrack.id}`);
-    } else {
-      res.header("Access-Control-Allow-Origin", "*");
-      res.status(404).send("No track found");
-    }
-  } catch (error) {
-    console.error(error);
-    res.status(500).send(error.toString());
-  }
+  );
 });
 
-// NEW: Endpoint to fetch the currently playing track for the authenticated user
-app.get("/currently-playing", async (req, res) => {
-  // You must have implemented OAuth to set the user access token (e.g., in req.session or a cookie)
-  const userAccessToken = req.session ? req.session.userAccessToken : null;
-  if (!userAccessToken) {
-    return res.status(401).send("User not authenticated");
-  }
-  try {
-    const currentTrackResponse = await axios.get(
-      "https://api.spotify.com/v1/me/player/currently-playing",
-      { headers: { Authorization: `Bearer ${userAccessToken}` } }
-    );
-    const trackData = currentTrackResponse.data;
-    if (!trackData || !trackData.item) {
-      return res.status(404).send("No track currently playing");
+// Endpoint to search for lyrics by musician and track name
+app.get("/getLyricsByName/:musician/:track", (req, res) => {
+  const clientId = process.env.CLIENT_ID;
+  const clientSecret = process.env.CLIENT_SECRET;
+  const encoded = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+
+  // Get access token from Spotify for search
+  request.post(
+    {
+      url: process.env.SEARCH_TOKEN,
+      headers: {
+        Authorization: `Basic ${encoded}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      form: {
+        grant_type: "client_credentials",
+      },
+    },
+    (error, response, body) => {
+      if (error) {
+        console.error("Error getting search token:", error);
+        return res.status(500).send(error);
+      }
+      let tokenResponse;
+      try {
+        tokenResponse = JSON.parse(body);
+      } catch (e) {
+        console.error("Error parsing search token response:", e);
+        return res.status(500).send("Invalid search token response");
+      }
+      const accessToken = tokenResponse.access_token;
+
+      // Build the Spotify API search URL using the musician and track name
+      const searchUrl =
+        process.env.SEARCH_URL +
+        `${encodeURIComponent(
+          req.params.musician
+        )}%20track:${encodeURIComponent(req.params.track)}&type=track&limit=10`;
+
+      // Search for the track on Spotify
+      request.get(
+        {
+          url: searchUrl,
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        },
+        (error, response, body) => {
+          if (error) {
+            console.error("Error searching track:", error);
+            return res.status(500).send(error);
+          }
+          let searchResult;
+          try {
+            searchResult = JSON.parse(body);
+          } catch (e) {
+            console.error("Error parsing search response:", e);
+            return res.status(500).send("Invalid search response");
+          }
+
+          if (!searchResult.tracks || !searchResult.tracks.items.length) {
+            return res
+              .status(404)
+              .send("No lyrics found for the provided track");
+          }
+
+          let tracks = searchResult.tracks.items;
+          // If remix query parameter is true, filter accordingly
+          if (req.query.remix === "true") {
+            tracks = tracks
+              .filter((track) => track.name.toLowerCase().includes("remix"))
+              .sort((a, b) => b.popularity - a.popularity);
+            // Fallback to non-remix tracks if none found
+            if (tracks.length === 0) {
+              tracks = searchResult.tracks.items
+                .filter((track) => !track.name.toLowerCase().includes("remix"))
+                .sort((a, b) => b.popularity - a.popularity);
+            }
+          } else {
+            tracks = tracks
+              .filter((track) => !track.name.toLowerCase().includes("remix"))
+              .sort((a, b) => b.popularity - a.popularity);
+          }
+
+          const realTrack = tracks[0];
+          if (realTrack) {
+            console.log("Selected track ID:", realTrack.id);
+            // Redirect to /getLyrics endpoint using the track ID
+            res.header("Access-Control-Allow-Origin", "*");
+            res.redirect(`/getLyrics/${realTrack.id}`);
+          } else {
+            res.header("Access-Control-Allow-Origin", "*");
+            res.status(404).send("No lyrics were found");
+          }
+        }
+      );
     }
-    const trackId = trackData.item.id;
-    // Redirect to the lyrics endpoint using the currently playing track's ID
-    res.redirect(`/getLyrics/${trackId}`);
-  } catch (error) {
-    console.error(error);
-    res.status(500).send(error.toString());
-  }
+  );
 });
 
 // Start the server
-app.listen(3000, () => {
-  console.log("Server started on port 3000");
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server started on port ${PORT}`);
 });
