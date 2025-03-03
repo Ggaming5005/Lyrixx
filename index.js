@@ -2,8 +2,16 @@ const express = require("express");
 const request = require("request");
 const path = require("path");
 const app = express();
+
 const cookie = process.env.COOKIE;
 
+// Middleware for setting CORS headers for all responses
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  next();
+});
+
+// Serve static files from the public folder
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/", (req, res) => {
@@ -27,24 +35,26 @@ app.get("/getLyrics/:trackId", (req, res) => {
     },
     (tokenErr, tokenResponse, tokenBody) => {
       if (tokenErr) {
-        console.error(tokenErr);
+        console.error("Token request error:", tokenErr);
         return res.status(500).send(tokenErr);
       }
       let tokenJson;
       try {
         tokenJson = JSON.parse(tokenBody);
       } catch (parseError) {
+        console.error("Error parsing token response:", parseError);
         return res.status(500).send("Error parsing token response");
       }
       const accessToken = tokenJson.accessToken;
-      console.log(accessToken);
+      console.log("Access Token:", accessToken);
 
       // Second request: Get lyrics using the access token
+      const lyricsUrl =
+        process.env.LYRICS_BASE_URL +
+        `${req.params.trackId}?format=json&vocalRemoval=false&market=from_token`;
       request.get(
         {
-          url:
-            process.env.LYRICS_BASE_URL +
-            `${req.params.trackId}?format=json&vocalRemoval=false&market=from_token`,
+          url: lyricsUrl,
           headers: {
             "app-platform": "WebPlayer",
             Authorization: `Bearer ${accessToken}`,
@@ -52,14 +62,15 @@ app.get("/getLyrics/:trackId", (req, res) => {
         },
         (lyricsErr, lyricsResponse, lyricsBody) => {
           if (lyricsErr) {
+            console.error("Lyrics request error:", lyricsErr);
             return res.status(500).send(lyricsErr);
           }
-          console.log(lyricsResponse.body);
-          res.header("Access-Control-Allow-Origin", "*");
+          console.log("Lyrics Response Body:", lyricsResponse.body);
           try {
             const lyricsJson = JSON.parse(lyricsResponse.body);
             res.send(JSON.stringify(lyricsJson, null, 2));
           } catch (parseError) {
+            console.error("Error parsing lyrics response:", parseError);
             res.status(500).send("Error parsing lyrics response");
           }
         }
@@ -87,12 +98,14 @@ app.get("/getLyricsByName/:musician/:track", (req, res) => {
     },
     (tokenErr, tokenResponse, tokenBody) => {
       if (tokenErr) {
+        console.error("Search token request error:", tokenErr);
         return res.status(500).send(tokenErr);
       }
       let tokenJson;
       try {
         tokenJson = JSON.parse(tokenBody);
       } catch (parseError) {
+        console.error("Error parsing search token response:", parseError);
         return res.status(500).send("Error parsing search token response");
       }
       const accessToken = tokenJson.access_token;
@@ -114,12 +127,14 @@ app.get("/getLyricsByName/:musician/:track", (req, res) => {
         },
         (searchErr, searchResponse, searchBody) => {
           if (searchErr) {
+            console.error("Search request error:", searchErr);
             return res.status(500).send(searchErr);
           }
           let searchJson;
           try {
             searchJson = JSON.parse(searchBody);
           } catch (parseError) {
+            console.error("Error parsing search response:", parseError);
             return res.status(500).send("Error parsing search response");
           }
 
@@ -146,11 +161,9 @@ app.get("/getLyricsByName/:musician/:track", (req, res) => {
 
           const realTrack = filteredTracks.shift();
           if (realTrack) {
-            console.log(realTrack.id);
-            res.header("Access-Control-Allow-Origin", "*");
+            console.log("Real Track ID:", realTrack.id);
             res.redirect(`/getLyrics/${realTrack.id}`);
           } else {
-            res.header("Access-Control-Allow-Origin", "*");
             res.status(404).send("No Remix lyrics was found");
           }
         }
