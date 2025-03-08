@@ -24,10 +24,10 @@
 
         <div class="endpoint">
           <h3>🔍 Search lyrics by Track ID</h3>
-          <pre><code>GET https://lyrixxx.vercel.app/getLyrics/{trackId}</code></pre>
+          <pre><code>GET https://lyrixx.vercel.app/getLyrics/{trackId}</code></pre>
           <p>Retrieve lyrics using the Spotify Track ID.</p>
           <strong>Example Request:</strong>
-          <pre><code>GET https://lyrixxx.vercel.app/getLyrics/123456789</code></pre>
+          <pre><code>GET https://lyrixx.vercel.app/getLyrics/123456789</code></pre>
           <strong>Example Response:</strong>
           <pre><code>{
   "trackId": "123456789",
@@ -39,16 +39,16 @@
 
         <div class="endpoint">
           <h3>🔍 Search lyrics by Artist & Track Name</h3>
-          <pre><code>GET https://lyrixxx.vercel.app/getLyricsByName/{artistName}/{trackName}?remix={true/false}</code></pre>
+          <pre><code>GET https://lyrixx.vercel.app/getLyricsByName/{artistName}/{trackName}?remix={true/false}</code></pre>
           <p>Retrieve lyrics using the artist and track name.</p>
           <p>
             <strong>Optional:</strong> Add <code>?remix=true</code> to get only
             official remix versions.
           </p>
           <strong>Example Request (Remix):</strong>
-          <pre><code>GET https://lyrixxx.vercel.app/getLyricsByName/JuiceWRLD/LucidDreams?remix=true</code></pre>
+          <pre><code>GET https://lyrixx.vercel.app/getLyricsByName/JuiceWRLD/LucidDreams?remix=true</code></pre>
           <strong>Example Request (Original):</strong>
-          <pre><code>GET https://lyrixxx.vercel.app/getLyricsByName/JuiceWRLD/LucidDreams</code></pre>
+          <pre><code>GET https://lyrixx.vercel.app/getLyricsByName/JuiceWRLD/LucidDreams</code></pre>
           <strong>Example Response:</strong>
           <pre><code>{
   "trackName": "Lucid Dreams",
@@ -67,7 +67,7 @@
             <ul>
               <li>
                 Make a <code>GET</code> request to
-                <code>https://lyrixxx.vercel.app/getLyrics/{trackId}</code>.
+                <code>https://lyrixx.vercel.app/getLyrics/{trackId}</code>.
               </li>
               <li>
                 Replace <code>{trackId}</code> with the actual Spotify Track ID.
@@ -80,7 +80,7 @@
               <li>
                 Make a <code>GET</code> request to
                 <code
-                  >https://lyrixxx.vercel.app/getLyricsByName/{artistName}/{trackName}?remix={true/false}</code
+                  >https://lyrixx.vercel.app/getLyricsByName/{artistName}/{trackName}?remix={true/false}</code
                 >.
               </li>
               <li>
