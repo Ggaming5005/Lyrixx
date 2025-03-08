@@ -5,10 +5,8 @@ const app = express();
 
 const cookie = process.env.COOKIE;
 
-// Serve static files from the 'public' folder
 app.use(express.static(path.join(__dirname, "public")));
 
-// Documentation endpoint
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
@@ -17,9 +15,7 @@ app.get("/key", (req, res) => {
   res.send("success");
 });
 
-// Endpoint to get lyrics by track ID
 app.get("/getLyrics/:trackId", (req, res) => {
-  // First, get the token using the cookie and TOKEN_URL
   request.get(
     {
       url: process.env.TOKEN_URL,
@@ -43,12 +39,11 @@ app.get("/getLyrics/:trackId", (req, res) => {
       const accessToken = tokenData.accessToken;
       console.log("Access Token:", accessToken);
 
-      // Use the token to fetch lyrics for the provided trackId
       request.get(
         {
           url:
             process.env.LYRICS_BASE_URL +
-            `${req.params.trackId}?format=json&vocalRemoval=false&market=from_token`,
+            `/${req.params.trackId}?format=json&vocalRemoval=false&market=from_token`,
           headers: {
             "app-platform": "WebPlayer",
             Authorization: `Bearer ${accessToken}`,
@@ -73,13 +68,11 @@ app.get("/getLyrics/:trackId", (req, res) => {
   );
 });
 
-// Endpoint to search for lyrics by musician and track name
 app.get("/getLyricsByName/:musician/:track", (req, res) => {
   const clientId = process.env.CLIENT_ID;
   const clientSecret = process.env.CLIENT_SECRET;
   const encoded = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
 
-  // Get access token from Spotify for search
   request.post(
     {
       url: process.env.SEARCH_TOKEN,
@@ -105,14 +98,12 @@ app.get("/getLyricsByName/:musician/:track", (req, res) => {
       }
       const accessToken = tokenResponse.access_token;
 
-      // Build the Spotify API search URL using the musician and track name
       const searchUrl =
         process.env.SEARCH_URL +
         `${encodeURIComponent(
           req.params.musician
         )}%20track:${encodeURIComponent(req.params.track)}&type=track&limit=10`;
 
-      // Search for the track on Spotify
       request.get(
         {
           url: searchUrl,
@@ -140,12 +131,10 @@ app.get("/getLyricsByName/:musician/:track", (req, res) => {
           }
 
           let tracks = searchResult.tracks.items;
-          // If remix query parameter is true, filter accordingly
           if (req.query.remix === "true") {
             tracks = tracks
               .filter((track) => track.name.toLowerCase().includes("remix"))
               .sort((a, b) => b.popularity - a.popularity);
-            // Fallback to non-remix tracks if none found
             if (tracks.length === 0) {
               tracks = searchResult.tracks.items
                 .filter((track) => !track.name.toLowerCase().includes("remix"))
@@ -160,7 +149,6 @@ app.get("/getLyricsByName/:musician/:track", (req, res) => {
           const realTrack = tracks[0];
           if (realTrack) {
             console.log("Selected track ID:", realTrack.id);
-            // Redirect to /getLyrics endpoint using the track ID
             res.header("Access-Control-Allow-Origin", "*");
             res.redirect(`/getLyrics/${realTrack.id}`);
           } else {
@@ -173,7 +161,6 @@ app.get("/getLyricsByName/:musician/:track", (req, res) => {
   );
 });
 
-// Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server started on port ${PORT}`);
