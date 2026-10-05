@@ -12,9 +12,10 @@ use std::sync::atomic::AtomicU64;
 /// Shown whenever an Advanced mode option is turned on or used.
 pub const BAN_WARNING: &str = "USING THIS MIGHT GET YOU BANNED. YOU HAVE BEEN WARNED.";
 
-/// The Discord application Lyrix uses for Rich Presence until the project's own
-/// application id is filled in. Empty means "not configured".
-pub const DEFAULT_DISCORD_CLIENT_ID: &str = "";
+/// Lyrix's own Discord application, so Rich Presence works with no setup and
+/// profiles show "Listening to Lyrix". `discord.client_id` can name another
+/// application to show a different name. Application ids are public.
+pub const DEFAULT_DISCORD_CLIENT_ID: &str = "1556752305653809272";
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

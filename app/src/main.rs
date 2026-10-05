@@ -527,7 +527,7 @@ impl TargetPlan {
         let client_id = config.discord.client_id.trim();
         let discord_client_id = if !config.discord.enabled {
             let fix = if client_id.is_empty() {
-                "set discord.enabled = true and discord.client_id"
+                "set discord.enabled = true and remove the empty discord.client_id line"
             } else {
                 "set discord.enabled = true"
             };
@@ -545,15 +545,14 @@ impl TargetPlan {
         } else if client_id.is_empty() {
             off.push((
                 "Discord: discord.client_id is empty".to_string(),
-                "set discord.client_id".to_string(),
+                "remove the empty discord.client_id line".to_string(),
             ));
             notes.push(format!(
-                "Discord Rich Presence stays off because discord.client_id is empty. Create an \
-                 application at https://discord.com/developers/applications and put its \
-                 application id in {} as client_id = \"<id>\" under [discord] (run `{}` first if \
-                 the file does not exist).",
-                config_path.display(),
-                lyrix_command(config_path, "config init")
+                "Discord Rich Presence stays off because discord.client_id is empty in {}. Remove \
+                 that line to use Lyrix's own Discord application, or set client_id = \"<id>\" \
+                 under [discord] to the id of your own application from \
+                 https://discord.com/developers/applications.",
+                config_path.display()
             ));
             None
         } else {
@@ -881,8 +880,9 @@ fn section_comment(section: &str) -> Option<String> {
                      # (free, no account). Found lyrics are cached on disk when cache = true.",
         "sources" => "# Players to prefer when several are playing (matched like blocked_apps).",
         "discord" => "# Discord Rich Presence (needs the Discord desktop app). client_id is the\n\
-                      # id of a Discord application (https://discord.com/developers/applications);\n\
-                      # its name is shown as \"Listening to <name>\".",
+                      # Discord application to show as, Lyrix's own by default. Use the id of your\n\
+                      # own application (https://discord.com/developers/applications) to show\n\
+                      # \"Listening to <its name>\" instead.",
         "console" => "# Print each status change in the terminal.",
         "advanced" => {
             return Some(format!(
@@ -1874,7 +1874,8 @@ mod tests {
 
     #[test]
     fn target_plan_without_discord_client_id() {
-        let config = Config::default();
+        let mut config = Config::default();
+        config.discord.client_id = String::new();
         let path = Path::new("/home/me/.config/lyrix/config.toml");
         let plan = TargetPlan::from_config(&config, &RunArgs::default(), path);
         assert!(plan.console);
@@ -2471,14 +2472,13 @@ mod tests {
     #[test]
     fn discord_note_names_the_config_file_in_use() {
         let path = Path::new("/somewhere/else.toml");
-        let plan = TargetPlan::from_config(&Config::default(), &RunArgs::default(), path);
+        let mut config = Config::default();
+        config.discord.client_id = String::new();
+        let plan = TargetPlan::from_config(&config, &RunArgs::default(), path);
         let note = &plan.notes[0];
-        assert!(note.contains(&lyrix_command(path, "config init")), "{note}");
+        assert!(note.contains(&path.display().to_string()), "{note}");
+        assert!(note.contains("Remove that line"), "{note}");
         assert!(!note.contains('\n'), "one line: {note}");
-
-        let default = Config::default_path();
-        let plan = TargetPlan::from_config(&Config::default(), &RunArgs::default(), &default);
-        assert!(plan.notes[0].contains("`lyrix config init`"), "{plan:?}");
     }
 
     #[test]
@@ -2486,6 +2486,7 @@ mod tests {
         // Console off; Discord on but without a client id; no flags given.
         let mut config = Config::default();
         config.console.enabled = false;
+        config.discord.client_id = String::new();
         let plan = TargetPlan::from_config(&config, &RunArgs::default(), Path::new("c.toml"));
         assert!(plan.names().is_empty());
         let message = plan.nothing_on_message(Path::new("c.toml"));
@@ -2516,12 +2517,22 @@ mod tests {
         let mut config = Config::default();
         config.console.enabled = false;
         config.discord.enabled = false;
+        config.discord.client_id = String::new();
         let plan = TargetPlan::from_config(&config, &RunArgs::default(), Path::new("c.toml"));
         let message = plan.nothing_on_message(Path::new("c.toml"));
         assert!(
-            message.contains("discord.enabled = true and discord.client_id"),
+            message.contains("discord.enabled = true and remove the empty discord.client_id"),
             "{message}"
         );
+
+        // Discord switched off with the default client id: only switch it on.
+        let mut config = Config::default();
+        config.console.enabled = false;
+        config.discord.enabled = false;
+        let plan = TargetPlan::from_config(&config, &RunArgs::default(), Path::new("c.toml"));
+        let message = plan.nothing_on_message(Path::new("c.toml"));
+        assert!(message.contains("set discord.enabled = true"), "{message}");
+        assert!(!message.contains("client_id"), "{message}");
     }
 
     #[test]

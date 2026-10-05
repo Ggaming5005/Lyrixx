@@ -39,18 +39,14 @@ lyrix                      # runs until Ctrl+C
 
 ### Discord
 
-Rich Presence needs the Discord desktop app running on the same computer, and a Discord application id. The application's name is what your profile shows as "Listening to …".
+Rich Presence works with no setup: keep the Discord desktop app running on the same computer and your profile shows **Listening to Lyrix** with the current lyric line. No login or token is needed.
 
-1. Open the [Discord Developer Portal](https://discord.com/developers/applications) and create an application named **Lyrix**.
-2. Copy its **Application ID**.
-3. Run `lyrix config path`, open that file, and set:
+To show a different name, create your own application in the [Discord Developer Portal](https://discord.com/developers/applications), copy its **Application ID**, run `lyrix config path`, and set it in that file:
 
-   ```toml
-   [discord]
-   client_id = "your application id"
-   ```
-
-No login or token is needed for Rich Presence.
+```toml
+[discord]
+client_id = "your application id"
+```
 
 ## Commands
 
