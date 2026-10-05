@@ -6,7 +6,8 @@ pub mod lrclib;
 
 use crate::types::{Lyrics, Track};
 use async_trait::async_trait;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Consecutive errors after which a provider is skipped for [`SKIP_FOR`].
 pub const MAX_CONSECUTIVE_ERRORS: u32 = 3;
@@ -48,24 +49,794 @@ pub enum Resolved {
 ///   `Ok` resets it; at [`MAX_CONSECUTIVE_ERRORS`] the provider is skipped until
 ///   [`SKIP_FOR`] has passed, then tried again. A provider error never fails
 ///   the whole lookup.
+///
+/// Details:
+/// - Of several unsynced results, the one from the earliest provider is kept.
+/// - A result that has no text and is not instrumental (for example LRC made
+///   only of timestamps) counts as "nothing" from that provider.
+/// - Unsynced lyrics from the cache are spread again over the track's
+///   duration, when it is known.
+/// - The outcome is not cached when it may be incomplete: nothing synced or
+///   instrumental was found while a provider failed or was skipped. So a
+///   network outage is not remembered as "not found", nor plain lyrics as the
+///   answer when a failing provider may have synced ones.
+/// - A provider that is tried again after [`SKIP_FOR`] and fails once more is
+///   skipped again right away; one success resets it.
+/// - A cache that cannot be written only logs a warning.
 pub struct ProviderChain {
-    _private: (),
+    providers: Vec<Box<dyn LyricsProvider>>,
+    cache: Option<cache::LyricsCache>,
+    /// One entry per provider, same order. Never held across an `.await`.
+    health: Mutex<Vec<Health>>,
+    /// The time source for health decisions; tests replace it.
+    now: Arc<dyn Fn() -> Instant + Send + Sync>,
+}
+
+/// Health of one provider.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Health {
+    consecutive_errors: u32,
+    /// Set when the provider reached [`MAX_CONSECUTIVE_ERRORS`].
+    skipped_until: Option<Instant>,
+}
+
+impl Health {
+    fn is_skipped(&self, now: Instant) -> bool {
+        self.consecutive_errors >= MAX_CONSECUTIVE_ERRORS
+            && self.skipped_until.is_some_and(|until| now < until)
+    }
 }
 
 impl ProviderChain {
     pub fn new(providers: Vec<Box<dyn LyricsProvider>>, cache: Option<cache::LyricsCache>) -> Self {
-        let _ = (providers, cache);
-        todo!()
+        let health = vec![Health::default(); providers.len()];
+        Self {
+            providers,
+            cache,
+            health: Mutex::new(health),
+            now: Arc::new(Instant::now),
+        }
+    }
+
+    /// Replaces the time source used for provider health.
+    #[cfg(test)]
+    pub(crate) fn with_clock(mut self, now: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
+        self.now = now;
+        self
     }
 
     /// See the type docs. Safe to call from several tasks at once.
     pub async fn resolve(&self, track: &Track) -> Resolved {
-        let _ = track;
-        todo!()
+        let track = crate::matcher::normalize_track(track);
+        let duration_ms = track.duration_ms.filter(|&d| d > 0);
+
+        if let Some(cache) = &self.cache {
+            if let Some(entry) = cache.get(&track).await {
+                return match entry.lyrics {
+                    Some(mut lyrics) => {
+                        spread(&mut lyrics, duration_ms);
+                        Resolved::Found(lyrics)
+                    }
+                    None => Resolved::NotFound,
+                };
+            }
+        }
+
+        // Synced or instrumental lyrics: nothing better can come.
+        let mut final_result: Option<Lyrics> = None;
+        // The first unsynced lyrics, used when nobody has synced ones.
+        let mut fallback: Option<Lyrics> = None;
+        // A provider failed or was skipped, so a better result may exist.
+        let mut incomplete = false;
+
+        for (index, provider) in self.providers.iter().enumerate() {
+            let name = provider.name();
+            if self.is_skipped(index) {
+                tracing::debug!(provider = name, "skipping a failing lyrics provider");
+                incomplete = true;
+                continue;
+            }
+            match provider.fetch(&track).await {
+                Ok(found) => {
+                    self.record_ok(index);
+                    let Some(mut lyrics) = found else {
+                        continue;
+                    };
+                    lyrics.source = name.to_string();
+                    if lyrics.instrumental || (lyrics.synced && lyrics.has_text()) {
+                        final_result = Some(lyrics);
+                        break;
+                    }
+                    if lyrics.has_text() && fallback.is_none() {
+                        fallback = Some(lyrics);
+                    }
+                }
+                Err(e) => {
+                    incomplete = true;
+                    if self.record_err(index) {
+                        tracing::warn!(
+                            provider = name,
+                            "lyrics lookup failed {MAX_CONSECUTIVE_ERRORS} times in a row, \
+                             not asking this provider for {} minutes: {e:#}",
+                            SKIP_FOR.as_secs() / 60
+                        );
+                    } else {
+                        tracing::warn!(provider = name, "lyrics lookup failed: {e:#}");
+                    }
+                }
+            }
+        }
+
+        let is_final = final_result.is_some();
+        let outcome = final_result.or(fallback).map(|mut lyrics| {
+            spread(&mut lyrics, duration_ms);
+            lyrics
+        });
+
+        if let Some(cache) = &self.cache {
+            if is_final || !incomplete {
+                let entry = cache::CacheEntry {
+                    lyrics: outcome.clone(),
+                    fetched_at: unix_now_secs(),
+                    duration_ms: track.duration_ms,
+                };
+                if let Err(e) = cache.put(&track, &entry).await {
+                    tracing::warn!("could not write to the lyrics cache: {e:#}");
+                }
+            }
+        }
+
+        match outcome {
+            Some(lyrics) => Resolved::Found(lyrics),
+            None => Resolved::NotFound,
+        }
     }
 
     /// Names of the providers, in order, with whether each is currently skipped.
     pub fn health(&self) -> Vec<(&'static str, bool)> {
-        todo!()
+        let now = (self.now)();
+        let health = self.lock_health();
+        self.providers
+            .iter()
+            .enumerate()
+            .map(|(index, provider)| {
+                let skipped = health.get(index).is_some_and(|h| h.is_skipped(now));
+                (provider.name(), skipped)
+            })
+            .collect()
+    }
+
+    fn lock_health(&self) -> MutexGuard<'_, Vec<Health>> {
+        // A panic while the lock was held leaves plain counters behind, which
+        // are still fine to use.
+        self.health.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn is_skipped(&self, index: usize) -> bool {
+        let now = (self.now)();
+        self.lock_health()
+            .get(index)
+            .is_some_and(|h| h.is_skipped(now))
+    }
+
+    fn record_ok(&self, index: usize) {
+        if let Some(h) = self.lock_health().get_mut(index) {
+            *h = Health::default();
+        }
+    }
+
+    /// Counts an error. Returns true when the provider is skipped from now on.
+    fn record_err(&self, index: usize) -> bool {
+        let now = (self.now)();
+        let mut health = self.lock_health();
+        let Some(h) = health.get_mut(index) else {
+            return false;
+        };
+        h.consecutive_errors = h.consecutive_errors.saturating_add(1);
+        if h.consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+            h.skipped_until = Some(now.checked_add(SKIP_FOR).unwrap_or(now));
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Spreads unsynced lyrics over a known, non-zero duration.
+fn spread(lyrics: &mut Lyrics, duration_ms: Option<u64>) {
+    if let Some(duration) = duration_ms {
+        if !lyrics.synced {
+            lyrics.spread_evenly(duration);
+        }
+    }
+}
+
+/// Unix seconds now, 0 when the system clock is before 1970.
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::LyricLine;
+    use std::collections::VecDeque;
+
+    /// What a fake provider answers.
+    #[derive(Debug, Clone)]
+    enum Reply {
+        Found(Lyrics),
+        Nothing,
+        Fail(&'static str),
+    }
+
+    /// A provider that answers from a script and records every track it saw.
+    struct FakeProvider {
+        name: &'static str,
+        replies: Mutex<VecDeque<Reply>>,
+        /// Answer once the script is used up.
+        default: Reply,
+        calls: Arc<Mutex<Vec<Track>>>,
+        delay: Duration,
+    }
+
+    impl FakeProvider {
+        fn new(name: &'static str, default: Reply) -> Self {
+            Self {
+                name,
+                replies: Mutex::new(VecDeque::new()),
+                default,
+                calls: Arc::new(Mutex::new(Vec::new())),
+                delay: Duration::ZERO,
+            }
+        }
+
+        fn script(self, replies: Vec<Reply>) -> Self {
+            *self.replies.lock().unwrap() = replies.into();
+            self
+        }
+
+        fn delayed(mut self, delay: Duration) -> Self {
+            self.delay = delay;
+            self
+        }
+
+        fn calls(&self) -> Arc<Mutex<Vec<Track>>> {
+            Arc::clone(&self.calls)
+        }
+    }
+
+    #[async_trait]
+    impl LyricsProvider for FakeProvider {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        async fn fetch(&self, track: &Track) -> anyhow::Result<Option<Lyrics>> {
+            self.calls.lock().unwrap().push(track.clone());
+            let reply = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| self.default.clone());
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            match reply {
+                Reply::Found(lyrics) => Ok(Some(lyrics)),
+                Reply::Nothing => Ok(None),
+                Reply::Fail(message) => Err(anyhow::anyhow!(message)),
+            }
+        }
+    }
+
+    /// A clock tests move by hand.
+    #[derive(Clone)]
+    struct TestClock {
+        base: Instant,
+        offset: Arc<Mutex<Duration>>,
+    }
+
+    impl TestClock {
+        fn new() -> Self {
+            Self {
+                base: Instant::now(),
+                offset: Arc::new(Mutex::new(Duration::ZERO)),
+            }
+        }
+
+        fn advance(&self, by: Duration) {
+            let mut offset = self.offset.lock().unwrap();
+            *offset += by;
+        }
+
+        fn source(&self) -> Arc<dyn Fn() -> Instant + Send + Sync> {
+            let clock = self.clone();
+            Arc::new(move || clock.base + *clock.offset.lock().unwrap())
+        }
+    }
+
+    fn track() -> Track {
+        Track {
+            title: "Song".into(),
+            artist: "Artist".into(),
+            album: Some("Album".into()),
+            duration_ms: Some(200_000),
+            spotify_id: None,
+        }
+    }
+
+    fn track_without_duration() -> Track {
+        Track {
+            duration_ms: None,
+            ..track()
+        }
+    }
+
+    fn synced(text: &str) -> Lyrics {
+        Lyrics {
+            lines: vec![
+                LyricLine {
+                    start_ms: 1_000,
+                    text: text.into(),
+                },
+                LyricLine {
+                    start_ms: 4_000,
+                    text: format!("{text} again"),
+                },
+            ],
+            synced: true,
+            instrumental: false,
+            source: "made up".into(),
+        }
+    }
+
+    fn plain(lines: &[&str]) -> Lyrics {
+        crate::lrc::from_plain(&lines.join("\n"))
+    }
+
+    fn instrumental() -> Lyrics {
+        Lyrics {
+            lines: Vec::new(),
+            synced: false,
+            instrumental: true,
+            source: String::new(),
+        }
+    }
+
+    fn chain(providers: Vec<FakeProvider>) -> ProviderChain {
+        let boxed = providers
+            .into_iter()
+            .map(|p| Box::new(p) as Box<dyn LyricsProvider>)
+            .collect();
+        ProviderChain::new(boxed, None)
+    }
+
+    fn found(resolved: Resolved) -> Lyrics {
+        match resolved {
+            Resolved::Found(lyrics) => lyrics,
+            Resolved::NotFound => panic!("expected lyrics, got NotFound"),
+        }
+    }
+
+    fn texts(lyrics: &Lyrics) -> Vec<&str> {
+        lyrics.lines.iter().map(|l| l.text.as_str()).collect()
+    }
+
+    fn starts(lyrics: &Lyrics) -> Vec<u64> {
+        lyrics.lines.iter().map(|l| l.start_ms).collect()
+    }
+
+    fn call_count(calls: &Arc<Mutex<Vec<Track>>>) -> usize {
+        calls.lock().unwrap().len()
+    }
+
+    // ---- order and preference ----
+
+    #[tokio::test]
+    async fn providers_are_asked_in_order_until_synced_lyrics_are_found() {
+        let first = FakeProvider::new("first", Reply::Nothing);
+        let second = FakeProvider::new("second", Reply::Found(synced("Two")));
+        let third = FakeProvider::new("third", Reply::Found(synced("Three")));
+        let (c1, c2, c3) = (first.calls(), second.calls(), third.calls());
+        let chain = chain(vec![first, second, third]);
+
+        let lyrics = found(chain.resolve(&track()).await);
+
+        assert_eq!(texts(&lyrics), ["Two", "Two again"]);
+        assert_eq!(lyrics.source, "second");
+        assert!(lyrics.synced);
+        assert_eq!(call_count(&c1), 1);
+        assert_eq!(call_count(&c2), 1);
+        assert_eq!(call_count(&c3), 0, "synced lyrics end the search");
+    }
+
+    #[tokio::test]
+    async fn synced_lyrics_beat_earlier_unsynced_ones() {
+        let first = FakeProvider::new("first", Reply::Found(plain(&["a", "b"])));
+        let second = FakeProvider::new("second", Reply::Found(synced("Synced")));
+        let chain = chain(vec![first, second]);
+
+        let lyrics = found(chain.resolve(&track()).await);
+
+        assert!(lyrics.synced);
+        assert_eq!(lyrics.source, "second");
+        assert_eq!(starts(&lyrics), [1_000, 4_000], "synced timings are kept");
+    }
+
+    #[tokio::test]
+    async fn unsynced_lyrics_are_the_fallback_and_the_earliest_one_wins() {
+        let first = FakeProvider::new("first", Reply::Found(plain(&["first a", "first b"])));
+        let second = FakeProvider::new("second", Reply::Nothing);
+        let third = FakeProvider::new("third", Reply::Found(plain(&["third"])));
+        let (c2, c3) = (second.calls(), third.calls());
+        let chain = chain(vec![first, second, third]);
+
+        let lyrics = found(chain.resolve(&track()).await);
+
+        assert_eq!(texts(&lyrics), ["first a", "first b"]);
+        assert_eq!(lyrics.source, "first");
+        assert!(!lyrics.synced);
+        assert_eq!(
+            call_count(&c2),
+            1,
+            "later providers are asked for synced lyrics"
+        );
+        assert_eq!(call_count(&c3), 1);
+    }
+
+    #[tokio::test]
+    async fn instrumental_results_are_final() {
+        let first = FakeProvider::new("first", Reply::Found(instrumental()));
+        let second = FakeProvider::new("second", Reply::Found(synced("Words")));
+        let c2 = second.calls();
+        let chain = chain(vec![first, second]);
+
+        let lyrics = found(chain.resolve(&track()).await);
+
+        assert!(lyrics.instrumental);
+        assert_eq!(lyrics.source, "first");
+        assert_eq!(call_count(&c2), 0);
+    }
+
+    #[tokio::test]
+    async fn instrumental_after_an_unsynced_fallback_wins() {
+        let first = FakeProvider::new("first", Reply::Found(plain(&["words"])));
+        let second = FakeProvider::new("second", Reply::Found(instrumental()));
+        let chain = chain(vec![first, second]);
+
+        let lyrics = found(chain.resolve(&track()).await);
+
+        assert!(lyrics.instrumental);
+        assert_eq!(lyrics.source, "second");
+    }
+
+    #[tokio::test]
+    async fn nothing_found_anywhere_is_not_found() {
+        let chain = chain(vec![
+            FakeProvider::new("first", Reply::Nothing),
+            FakeProvider::new("second", Reply::Nothing),
+        ]);
+        assert_eq!(chain.resolve(&track()).await, Resolved::NotFound);
+    }
+
+    #[tokio::test]
+    async fn an_empty_chain_finds_nothing() {
+        let chain = chain(Vec::new());
+        assert_eq!(chain.resolve(&track()).await, Resolved::NotFound);
+        assert!(chain.health().is_empty());
+    }
+
+    #[tokio::test]
+    async fn results_without_text_count_as_nothing() {
+        let empty_synced = Lyrics {
+            lines: vec![LyricLine {
+                start_ms: 1_000,
+                text: String::new(),
+            }],
+            synced: true,
+            instrumental: false,
+            source: String::new(),
+        };
+        let first = FakeProvider::new("first", Reply::Found(empty_synced));
+        let second = FakeProvider::new("second", Reply::Found(Lyrics::default()));
+        let third = FakeProvider::new("third", Reply::Found(plain(&["real words"])));
+        let chain = chain(vec![first, second, third]);
+
+        let lyrics = found(chain.resolve(&track()).await);
+        assert_eq!(lyrics.source, "third");
+        assert_eq!(texts(&lyrics), ["real words"]);
+
+        let only_empty = self::chain(vec![FakeProvider::new(
+            "first",
+            Reply::Found(Lyrics::default()),
+        )]);
+        assert_eq!(only_empty.resolve(&track()).await, Resolved::NotFound);
+    }
+
+    #[tokio::test]
+    async fn source_is_set_to_the_provider_name() {
+        let mut lyrics = synced("x");
+        lyrics.source = "something else".into();
+        let chain = chain(vec![FakeProvider::new("mine", Reply::Found(lyrics))]);
+        assert_eq!(found(chain.resolve(&track()).await).source, "mine");
+    }
+
+    // ---- unsynced timing ----
+
+    #[tokio::test]
+    async fn unsynced_lyrics_are_spread_over_a_known_duration() {
+        let mut t = track();
+        t.duration_ms = Some(100_000);
+        let chain = chain(vec![FakeProvider::new(
+            "plain",
+            Reply::Found(plain(&["a", "b", "c"])),
+        )]);
+
+        let lyrics = found(chain.resolve(&t).await);
+
+        assert_eq!(starts(&lyrics), [5_000, 47_500, 90_000]);
+        assert!(!lyrics.synced, "spreading keeps synced = false");
+    }
+
+    #[tokio::test]
+    async fn unsynced_lyrics_stay_at_zero_without_a_duration() {
+        for duration in [None, Some(0)] {
+            let mut t = track();
+            t.duration_ms = duration;
+            let chain = chain(vec![FakeProvider::new(
+                "plain",
+                Reply::Found(plain(&["a", "b"])),
+            )]);
+            let lyrics = found(chain.resolve(&t).await);
+            assert_eq!(starts(&lyrics), [0, 0], "duration {duration:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn synced_lyrics_are_not_spread() {
+        let chain = chain(vec![FakeProvider::new("s", Reply::Found(synced("x")))]);
+        let lyrics = found(chain.resolve(&track()).await);
+        assert_eq!(starts(&lyrics), [1_000, 4_000]);
+    }
+
+    // ---- normalization ----
+
+    #[tokio::test]
+    async fn the_track_is_normalized_before_any_provider_sees_it() {
+        let provider = FakeProvider::new("p", Reply::Nothing);
+        let calls = provider.calls();
+        let chain = chain(vec![provider]);
+        let raw = Track {
+            title: "Never Gonna Give You Up (Remastered 2011)".into(),
+            artist: "RickAstleyVEVO".into(),
+            album: Some("Whenever You Need Somebody".into()),
+            duration_ms: Some(213_000),
+            spotify_id: Some("4PTG3Z6ehGkBFwjybzWkR8".into()),
+        };
+
+        chain.resolve(&raw).await;
+
+        let seen = calls.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0], crate::matcher::normalize_track(&raw));
+        assert_eq!(seen[0].title, "Never Gonna Give You Up");
+        assert_eq!(seen[0].artist, "RickAstley");
+        assert_eq!(seen[0].album, raw.album);
+        assert_eq!(seen[0].duration_ms, raw.duration_ms);
+        assert_eq!(seen[0].spotify_id, raw.spotify_id);
+    }
+
+    #[tokio::test]
+    async fn video_titles_are_split_into_artist_and_title() {
+        let provider = FakeProvider::new("p", Reply::Nothing);
+        let calls = provider.calls();
+        let chain = chain(vec![provider]);
+        let raw = Track {
+            title: "Rick Astley - Never Gonna Give You Up (Official Video)".into(),
+            artist: "YouTube".into(),
+            ..Track::default()
+        };
+
+        chain.resolve(&raw).await;
+
+        let seen = calls.lock().unwrap().clone();
+        assert_eq!(seen[0].artist, "Rick Astley");
+        assert_eq!(seen[0].title, "Never Gonna Give You Up");
+    }
+
+    // ---- errors and health ----
+
+    #[tokio::test]
+    async fn a_provider_error_never_fails_the_lookup() {
+        let first = FakeProvider::new("broken", Reply::Fail("connection refused"));
+        let second = FakeProvider::new("works", Reply::Found(synced("Hello")));
+        let chain = chain(vec![first, second]);
+
+        let lyrics = found(chain.resolve(&track()).await);
+        assert_eq!(lyrics.source, "works");
+
+        let all_broken = self::chain(vec![
+            FakeProvider::new("a", Reply::Fail("boom")),
+            FakeProvider::new("b", Reply::Fail("boom")),
+        ]);
+        assert_eq!(all_broken.resolve(&track()).await, Resolved::NotFound);
+    }
+
+    #[tokio::test]
+    async fn errors_are_counted_and_the_provider_is_skipped_at_the_limit() {
+        let clock = TestClock::new();
+        let broken = FakeProvider::new("broken", Reply::Fail("timeout"));
+        let other = FakeProvider::new("other", Reply::Nothing);
+        let (broken_calls, other_calls) = (broken.calls(), other.calls());
+        let chain = chain(vec![broken, other]).with_clock(clock.source());
+
+        assert_eq!(chain.health(), [("broken", false), ("other", false)]);
+        for round in 1..MAX_CONSECUTIVE_ERRORS {
+            chain.resolve(&track()).await;
+            assert_eq!(
+                chain.health(),
+                [("broken", false), ("other", false)],
+                "after {round} errors"
+            );
+        }
+        chain.resolve(&track()).await;
+        assert_eq!(chain.health(), [("broken", true), ("other", false)]);
+        assert_eq!(call_count(&broken_calls), MAX_CONSECUTIVE_ERRORS as usize);
+
+        // Skipped: not asked any more, the others still are.
+        chain.resolve(&track()).await;
+        chain.resolve(&track()).await;
+        assert_eq!(call_count(&broken_calls), MAX_CONSECUTIVE_ERRORS as usize);
+        assert_eq!(
+            call_count(&other_calls),
+            MAX_CONSECUTIVE_ERRORS as usize + 2
+        );
+    }
+
+    #[tokio::test]
+    async fn a_skipped_provider_is_tried_again_after_skip_for() {
+        let clock = TestClock::new();
+        let broken = FakeProvider::new("flaky", Reply::Found(synced("Back")))
+            .script(vec![Reply::Fail("down"); MAX_CONSECUTIVE_ERRORS as usize]);
+        let calls = broken.calls();
+        let chain = chain(vec![broken]).with_clock(clock.source());
+
+        for _ in 0..MAX_CONSECUTIVE_ERRORS {
+            assert_eq!(chain.resolve(&track()).await, Resolved::NotFound);
+        }
+        assert_eq!(chain.health(), [("flaky", true)]);
+
+        clock.advance(SKIP_FOR - Duration::from_secs(1));
+        assert_eq!(chain.health(), [("flaky", true)]);
+        assert_eq!(chain.resolve(&track()).await, Resolved::NotFound);
+        assert_eq!(call_count(&calls), MAX_CONSECUTIVE_ERRORS as usize);
+
+        clock.advance(Duration::from_secs(1));
+        assert_eq!(chain.health(), [("flaky", false)]);
+        let lyrics = found(chain.resolve(&track()).await);
+        assert_eq!(lyrics.source, "flaky");
+        assert_eq!(call_count(&calls), MAX_CONSECUTIVE_ERRORS as usize + 1);
+        assert_eq!(chain.health(), [("flaky", false)]);
+    }
+
+    #[tokio::test]
+    async fn a_retried_provider_that_fails_again_is_skipped_again() {
+        let clock = TestClock::new();
+        let broken = FakeProvider::new("broken", Reply::Fail("still down"));
+        let calls = broken.calls();
+        let chain = chain(vec![broken]).with_clock(clock.source());
+
+        for _ in 0..MAX_CONSECUTIVE_ERRORS {
+            chain.resolve(&track()).await;
+        }
+        clock.advance(SKIP_FOR);
+        chain.resolve(&track()).await;
+        assert_eq!(call_count(&calls), MAX_CONSECUTIVE_ERRORS as usize + 1);
+        assert_eq!(chain.health(), [("broken", true)]);
+
+        chain.resolve(&track()).await;
+        assert_eq!(call_count(&calls), MAX_CONSECUTIVE_ERRORS as usize + 1);
+    }
+
+    #[tokio::test]
+    async fn a_success_resets_the_error_count() {
+        let flaky = FakeProvider::new("flaky", Reply::Nothing).script(vec![
+            Reply::Fail("1"),
+            Reply::Fail("2"),
+            Reply::Nothing,
+            Reply::Fail("1"),
+            Reply::Fail("2"),
+            Reply::Found(synced("ok")),
+            Reply::Fail("1"),
+            Reply::Fail("2"),
+            Reply::Fail("3"),
+        ]);
+        let calls = flaky.calls();
+        let chain = chain(vec![flaky]);
+
+        for _ in 0..8 {
+            chain.resolve(&track()).await;
+            assert_eq!(chain.health(), [("flaky", false)]);
+        }
+        chain.resolve(&track()).await;
+        assert_eq!(chain.health(), [("flaky", true)]);
+        assert_eq!(call_count(&calls), 9);
+    }
+
+    #[tokio::test]
+    async fn health_lists_providers_in_order() {
+        let chain = chain(vec![
+            FakeProvider::new("local", Reply::Nothing),
+            FakeProvider::new("lrclib", Reply::Nothing),
+        ]);
+        assert_eq!(chain.health(), [("local", false), ("lrclib", false)]);
+    }
+
+    // ---- concurrency ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn resolve_can_run_from_many_tasks_at_once() {
+        let slow = FakeProvider::new("slow", Reply::Fail("down")).delayed(Duration::from_millis(5));
+        let fast = FakeProvider::new("fast", Reply::Found(synced("Hi")));
+        let (slow_calls, fast_calls) = (slow.calls(), fast.calls());
+        let chain = Arc::new(chain(vec![slow, fast]));
+
+        let tasks: Vec<_> = (0..16)
+            .map(|_| {
+                let chain = Arc::clone(&chain);
+                tokio::spawn(async move { chain.resolve(&track_without_duration()).await })
+            })
+            .collect();
+        for task in tasks {
+            let lyrics = found(task.await.unwrap());
+            assert_eq!(lyrics.source, "fast");
+        }
+
+        // Every lookup reached the fast provider; the failing one was asked
+        // until its failures got it skipped (lookups already past the check
+        // when that happened still asked it).
+        assert_eq!(call_count(&fast_calls), 16);
+        let slow_count = call_count(&slow_calls);
+        assert!(
+            slow_count >= MAX_CONSECUTIVE_ERRORS as usize && slow_count <= 16,
+            "slow provider called {slow_count} times"
+        );
+        assert_eq!(chain.health(), [("slow", true), ("fast", false)]);
+    }
+
+    #[test]
+    fn health_skip_needs_both_the_count_and_the_deadline() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(1);
+        assert!(!Health::default().is_skipped(now));
+        let counted_only = Health {
+            consecutive_errors: MAX_CONSECUTIVE_ERRORS,
+            skipped_until: None,
+        };
+        assert!(!counted_only.is_skipped(now));
+        let skipped = Health {
+            consecutive_errors: MAX_CONSECUTIVE_ERRORS,
+            skipped_until: Some(later),
+        };
+        assert!(skipped.is_skipped(now));
+        assert!(
+            !skipped.is_skipped(later),
+            "the deadline itself ends the skip"
+        );
+        let below = Health {
+            consecutive_errors: MAX_CONSECUTIVE_ERRORS - 1,
+            skipped_until: Some(later),
+        };
+        assert!(!below.is_skipped(now));
+    }
+
+    #[test]
+    fn unix_now_is_after_2020() {
+        assert!(unix_now_secs() > 1_577_836_800);
     }
 }
