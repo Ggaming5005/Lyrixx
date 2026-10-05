@@ -112,7 +112,7 @@ export function createLyricsPage({ root, api, model }) {
         {
           title: 'Saved lyrics',
           icon: 'database',
-          note: 'Saved lyrics are checked before anything else. Added your own file for a song Lyrix already found? Clear saved lyrics so your file is used.',
+          note: 'Your own files always come first, even for songs Lyrix already saved.',
         },
         row({
           lead: 'database',

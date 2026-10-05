@@ -46,6 +46,10 @@ impl LyricsProvider for LocalLrcProvider {
         "local"
     }
 
+    fn is_local(&self) -> bool {
+        true
+    }
+
     async fn fetch(&self, track: &Track) -> anyhow::Result<Option<Lyrics>> {
         let keys = wanted_keys(track);
         if keys.is_empty() {

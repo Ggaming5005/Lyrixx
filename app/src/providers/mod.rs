@@ -25,6 +25,13 @@ pub trait LyricsProvider: Send + Sync {
     /// `Err` means the provider failed (network, bad response) and counts
     /// against its health.
     async fn fetch(&self, track: &Track) -> anyhow::Result<Option<Lyrics>>;
+
+    /// True for the user's own files: asked before the cache, and never
+    /// cached, so a file added for a song that was looked up before is used
+    /// right away.
+    fn is_local(&self) -> bool {
+        false
+    }
 }
 
 /// The outcome of a lookup.
@@ -34,16 +41,23 @@ pub enum Resolved {
     NotFound,
 }
 
-/// Tries the cache, then each healthy provider in order.
+/// Tries the local providers, then the cache, then each other healthy
+/// provider in order.
 ///
 /// - The track is normalized with [`crate::matcher::normalize_track`] first.
-/// - A cache hit (including a fresh "not found" entry) returns immediately.
+/// - Local providers ([`LyricsProvider::is_local`], your own files) are asked
+///   first and their results are never cached: synced or instrumental lyrics
+///   from them return at once; plain ones are kept as the first fallback.
+/// - A cache hit (including a fresh "not found" entry) returns without asking
+///   the other providers; a local fallback still beats a cached "not found"
+///   or cached plain lyrics.
 /// - Synced lyrics win: if a provider returns unsynced lyrics, they are kept as
 ///   a fallback and the remaining providers are still asked for synced ones.
 ///   Instrumental results count as final.
 /// - Unsynced lyrics are returned with timings spread by
 ///   [`Lyrics::spread_evenly`] when the duration is known.
-/// - The final outcome (found or not found) is written to the cache when one is set.
+/// - The final outcome of the other providers (found or not found) is written
+///   to the cache when one is set.
 /// - [`Lyrics::source`] is set to the provider's name.
 /// - Health: an `Err` increments the provider's consecutive error count;
 ///   `Ok` resets it; at [`MAX_CONSECUTIVE_ERRORS`] the provider is skipped until
@@ -110,9 +124,32 @@ impl ProviderChain {
         let track = crate::matcher::normalize_track(track);
         let duration_ms = track.duration_ms.filter(|&d| d > 0);
 
+        // Your own files first. A failing one is logged and does not make the
+        // other providers' outcome incomplete (it is never cached anyway).
+        let mut local_fallback: Option<Lyrics> = None;
+        for (index, provider) in self.providers.iter().enumerate() {
+            if !provider.is_local() {
+                continue;
+            }
+            match self.ask(index, provider.as_ref(), &track).await {
+                Answer::Final(mut lyrics) => {
+                    spread(&mut lyrics, duration_ms);
+                    return Resolved::Found(lyrics);
+                }
+                Answer::Plain(lyrics) => {
+                    local_fallback.get_or_insert(lyrics);
+                }
+                Answer::Nothing | Answer::Failed => {}
+            }
+        }
+
         if let Some(cache) = &self.cache {
             if let Some(entry) = cache.get(&track).await {
-                return match entry.lyrics {
+                let best = match entry.lyrics {
+                    Some(lyrics) if is_final(&lyrics) => Some(lyrics),
+                    cached => local_fallback.or(cached),
+                };
+                return match best {
                     Some(mut lyrics) => {
                         spread(&mut lyrics, duration_ms);
                         Resolved::Found(lyrics)
@@ -130,51 +167,30 @@ impl ProviderChain {
         let mut incomplete = false;
 
         for (index, provider) in self.providers.iter().enumerate() {
-            let name = provider.name();
-            if self.is_skipped(index) {
-                tracing::debug!(provider = name, "skipping a failing lyrics provider");
-                incomplete = true;
+            if provider.is_local() {
                 continue;
             }
-            match provider.fetch(&track).await {
-                Ok(found) => {
-                    self.record_ok(index);
-                    let Some(mut lyrics) = found else {
-                        continue;
-                    };
-                    lyrics.source = name.to_string();
-                    if lyrics.instrumental || (lyrics.synced && lyrics.has_text()) {
-                        final_result = Some(lyrics);
-                        break;
-                    }
-                    if lyrics.has_text() && fallback.is_none() {
-                        fallback = Some(lyrics);
-                    }
+            match self.ask(index, provider.as_ref(), &track).await {
+                Answer::Final(lyrics) => {
+                    final_result = Some(lyrics);
+                    break;
                 }
-                Err(e) => {
-                    incomplete = true;
-                    if self.record_err(index) {
-                        tracing::warn!(
-                            provider = name,
-                            "lyrics lookup failed {MAX_CONSECUTIVE_ERRORS} times in a row, \
-                             not asking this provider for {} minutes: {e:#}",
-                            SKIP_FOR.as_secs() / 60
-                        );
-                    } else {
-                        tracing::warn!(provider = name, "lyrics lookup failed: {e:#}");
-                    }
+                Answer::Plain(lyrics) => {
+                    fallback.get_or_insert(lyrics);
                 }
+                Answer::Nothing => {}
+                Answer::Failed => incomplete = true,
             }
         }
 
-        let is_final = final_result.is_some();
+        let found_final = final_result.is_some();
         let outcome = final_result.or(fallback).map(|mut lyrics| {
             spread(&mut lyrics, duration_ms);
             lyrics
         });
 
         if let Some(cache) = &self.cache {
-            if is_final || !incomplete {
+            if found_final || !incomplete {
                 let entry = cache::CacheEntry {
                     lyrics: outcome.clone(),
                     fetched_at: unix_now_secs(),
@@ -186,9 +202,57 @@ impl ProviderChain {
             }
         }
 
-        match outcome {
+        let best = if found_final {
+            outcome
+        } else {
+            local_fallback
+                .map(|mut lyrics| {
+                    spread(&mut lyrics, duration_ms);
+                    lyrics
+                })
+                .or(outcome)
+        };
+        match best {
             Some(lyrics) => Resolved::Found(lyrics),
             None => Resolved::NotFound,
+        }
+    }
+
+    /// Asks one provider (unless it is skipped), keeping its health.
+    async fn ask(&self, index: usize, provider: &dyn LyricsProvider, track: &Track) -> Answer {
+        let name = provider.name();
+        if self.is_skipped(index) {
+            tracing::debug!(provider = name, "skipping a failing lyrics provider");
+            return Answer::Failed;
+        }
+        match provider.fetch(track).await {
+            Ok(found) => {
+                self.record_ok(index);
+                let Some(mut lyrics) = found else {
+                    return Answer::Nothing;
+                };
+                lyrics.source = name.to_string();
+                if is_final(&lyrics) {
+                    Answer::Final(lyrics)
+                } else if lyrics.has_text() {
+                    Answer::Plain(lyrics)
+                } else {
+                    Answer::Nothing
+                }
+            }
+            Err(e) => {
+                if self.record_err(index) {
+                    tracing::warn!(
+                        provider = name,
+                        "lyrics lookup failed {MAX_CONSECUTIVE_ERRORS} times in a row, \
+                         not asking this provider for {} minutes: {e:#}",
+                        SKIP_FOR.as_secs() / 60
+                    );
+                } else {
+                    tracing::warn!(provider = name, "lyrics lookup failed: {e:#}");
+                }
+                Answer::Failed
+            }
         }
     }
 
@@ -243,6 +307,23 @@ impl ProviderChain {
 }
 
 /// Spreads unsynced lyrics over a known, non-zero duration.
+/// What one provider gave.
+enum Answer {
+    /// Synced lyrics with text, or an instrumental song: nothing better can come.
+    Final(Lyrics),
+    /// Unsynced lyrics with text.
+    Plain(Lyrics),
+    /// Nothing usable.
+    Nothing,
+    /// The provider failed or is skipped.
+    Failed,
+}
+
+/// Synced lyrics with text, or instrumental.
+fn is_final(lyrics: &Lyrics) -> bool {
+    lyrics.instrumental || (lyrics.synced && lyrics.has_text())
+}
+
 fn spread(lyrics: &mut Lyrics, duration_ms: Option<u64>) {
     if let Some(duration) = duration_ms {
         if !lyrics.synced {
@@ -281,6 +362,7 @@ mod tests {
         default: Reply,
         calls: Arc<Mutex<Vec<Track>>>,
         delay: Duration,
+        local: bool,
     }
 
     impl FakeProvider {
@@ -291,7 +373,14 @@ mod tests {
                 default,
                 calls: Arc::new(Mutex::new(Vec::new())),
                 delay: Duration::ZERO,
+                local: false,
             }
+        }
+
+        /// Makes this provider stand for your own files.
+        fn local(mut self) -> Self {
+            self.local = true;
+            self
         }
 
         fn script(self, replies: Vec<Reply>) -> Self {
@@ -313,6 +402,10 @@ mod tests {
     impl LyricsProvider for FakeProvider {
         fn name(&self) -> &'static str {
             self.name
+        }
+
+        fn is_local(&self) -> bool {
+            self.local
         }
 
         async fn fetch(&self, track: &Track) -> anyhow::Result<Option<Lyrics>> {
@@ -838,5 +931,133 @@ mod tests {
     #[test]
     fn unix_now_is_after_2020() {
         assert!(unix_now_secs() > 1_577_836_800);
+    }
+
+    // ---- your own files and the cache ----
+
+    fn chain_with_cache(providers: Vec<FakeProvider>, dir: &std::path::Path) -> ProviderChain {
+        let boxed = providers
+            .into_iter()
+            .map(|p| Box::new(p) as Box<dyn LyricsProvider>)
+            .collect();
+        ProviderChain::new(boxed, Some(cache::LyricsCache::new(dir.to_path_buf())))
+    }
+
+    #[tokio::test]
+    async fn your_own_file_beats_lyrics_cached_earlier_and_is_never_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let normalized = crate::matcher::normalize_track(&track());
+
+        // Looked up online first: the cache now holds LRCLIB's lyrics.
+        let remote = chain_with_cache(
+            vec![FakeProvider::new("lrclib", Reply::Found(synced("online")))],
+            dir.path(),
+        );
+        assert_eq!(
+            found(remote.resolve(&track()).await).lines[0].text,
+            "online"
+        );
+
+        // Then the user adds a file: it wins, and LRCLIB is not asked.
+        let local = FakeProvider::new("local", Reply::Found(synced("mine"))).local();
+        let lrclib = FakeProvider::new("lrclib", Reply::Found(synced("online")));
+        let lrclib_calls = lrclib.calls();
+        let chain = chain_with_cache(vec![local, lrclib], dir.path());
+        let lyrics = found(chain.resolve(&track()).await);
+        assert_eq!(lyrics.lines[0].text, "mine");
+        assert_eq!(lyrics.source, "local");
+        assert!(lrclib_calls.lock().unwrap().is_empty());
+
+        // The cache still holds the online lyrics, not the file's.
+        let cache = cache::LyricsCache::new(dir.path().to_path_buf());
+        let entry = cache.get(&normalized).await.unwrap();
+        assert_eq!(entry.lyrics.unwrap().lines[0].text, "online");
+    }
+
+    #[tokio::test]
+    async fn a_plain_file_beats_a_cached_not_found_and_plain_online_lyrics() {
+        let dir = tempfile::tempdir().unwrap();
+        let mine = plain(&["my words", "more of mine"]);
+
+        // Nothing online: the plain file is used, and "not found" is cached
+        // for the online providers.
+        let chain = chain_with_cache(
+            vec![
+                FakeProvider::new("local", Reply::Found(mine.clone())).local(),
+                FakeProvider::new("lrclib", Reply::Nothing),
+            ],
+            dir.path(),
+        );
+        assert_eq!(found(chain.resolve(&track()).await).source, "local");
+        let normalized = crate::matcher::normalize_track(&track());
+        let cache = cache::LyricsCache::new(dir.path().to_path_buf());
+        assert_eq!(cache.get(&normalized).await.unwrap().lyrics, None);
+
+        // The cached "not found" does not hide the file next time.
+        let lrclib = FakeProvider::new("lrclib", Reply::Nothing);
+        let lrclib_calls = lrclib.calls();
+        let chain = chain_with_cache(
+            vec![
+                FakeProvider::new("local", Reply::Found(mine.clone())).local(),
+                lrclib,
+            ],
+            dir.path(),
+        );
+        let lyrics = found(chain.resolve(&track()).await);
+        assert_eq!(lyrics.source, "local");
+        assert!(lyrics.lines.iter().any(|l| l.start_ms > 0), "spread");
+        assert!(
+            lrclib_calls.lock().unwrap().is_empty(),
+            "answered by the cache"
+        );
+
+        // Plain lyrics online: the file is still the earlier, preferred one.
+        let dir = tempfile::tempdir().unwrap();
+        let chain = chain_with_cache(
+            vec![
+                FakeProvider::new("local", Reply::Found(mine)).local(),
+                FakeProvider::new("lrclib", Reply::Found(plain(&["online words"]))),
+            ],
+            dir.path(),
+        );
+        assert_eq!(found(chain.resolve(&track()).await).source, "local");
+    }
+
+    #[tokio::test]
+    async fn synced_lyrics_online_beat_a_plain_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = chain_with_cache(
+            vec![
+                FakeProvider::new("local", Reply::Found(plain(&["my words"]))).local(),
+                FakeProvider::new("lrclib", Reply::Found(synced("online"))),
+            ],
+            dir.path(),
+        );
+        assert_eq!(found(chain.resolve(&track()).await).source, "lrclib");
+        // And from the cache next time.
+        let chain = chain_with_cache(
+            vec![
+                FakeProvider::new("local", Reply::Found(plain(&["my words"]))).local(),
+                FakeProvider::new("lrclib", Reply::Fail("offline")),
+            ],
+            dir.path(),
+        );
+        assert_eq!(found(chain.resolve(&track()).await).source, "lrclib");
+    }
+
+    #[tokio::test]
+    async fn a_failing_folder_does_not_stop_caching_the_online_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = chain_with_cache(
+            vec![
+                FakeProvider::new("local", Reply::Fail("permission denied")).local(),
+                FakeProvider::new("lrclib", Reply::Nothing),
+            ],
+            dir.path(),
+        );
+        assert_eq!(chain.resolve(&track()).await, Resolved::NotFound);
+        let normalized = crate::matcher::normalize_track(&track());
+        let cache = cache::LyricsCache::new(dir.path().to_path_buf());
+        assert!(cache.get(&normalized).await.is_some());
     }
 }
