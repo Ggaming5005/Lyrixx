@@ -3,11 +3,18 @@
 // state can be shown without the app. URL parameters:
 //
 //   ?scenario=playing | searching | notFound | instrumental | idle | paused |
-//             discordWaiting | error   (also: estimated, musicPaused)
+//             discordWaiting | error   (also: estimated, untimed, musicPaused)
 //   ?t=<seconds>   where the demo song starts (each scenario has a default)
 //   ?os=windows | macos | linux   (default: this browser's system)
+//   ?boot=<ms>     start like the app, with no engine running for that long
 //
 // ?page= and ?theme= are read by the window itself (main.js, theme-boot.js).
+//
+// Saving the settings restarts the demo engine like the app does (stopped,
+// then running with nothing playing until its first look, then the lyrics
+// looked up again). `window.lyrixDemo` lets checks (tools/flows.mjs) send an
+// event such as `lyrix://closing`, edit the demo settings file, and read
+// what `save_settings` received.
 
 import { PLAYER_IDS, SONGS } from './mock-data.js';
 import { filterProfanity, renderTemplate } from './template.js';
@@ -18,6 +25,11 @@ const DEFAULT_CLIENT_ID = '1556752305653809272';
 const LAST_RESORT_TEMPLATE = '{title} · {artist}';
 /** Same as the engine: the view is sent at most every 100 ms. */
 const TICK_MS = 100;
+/**
+ * A restart in the demo: stopping (the app clears Discord first), then from
+ * the start to the new engine's first look, then the lyrics lookup.
+ */
+const RESTART = { stopMs: 450, firstLookMs: 400, lookupMs: 300 };
 
 /** Demo songs played in each scenario, and where the first one starts (seconds). */
 const SCENARIOS = {
@@ -26,12 +38,15 @@ const SCENARIOS = {
   notFound: { queue: [1], start: 40 },
   instrumental: { queue: [3], start: 41 },
   estimated: { queue: [2], start: 61 },
+  untimed: { queue: [4], start: 61 },
   idle: { queue: [], start: 0 },
   paused: { queue: [0], start: 52.9 },
   musicPaused: { queue: [0], start: 97.5 },
   discordWaiting: { queue: [0], start: 52.9 },
   error: { queue: [], start: 0 },
 };
+
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 function defaultConfig() {
   return {
@@ -159,7 +174,9 @@ const clone = (value) => (value === undefined ? undefined : JSON.parse(JSON.stri
 
 /** Creates the demo backend: `{ invoke(command, args), listen(event, callback) }`. */
 export function createMockBackend(params) {
-  const scenario = Object.hasOwn(SCENARIOS, params.get('scenario')) ? params.get('scenario') : 'playing';
+  const scenario = Object.prototype.hasOwnProperty.call(SCENARIOS, params.get('scenario'))
+    ? params.get('scenario')
+    : 'playing';
   const os = ['windows', 'macos', 'linux'].includes(params.get('os')) ? params.get('os') : detectOs();
   const plan = SCENARIOS[scenario];
   const startSeconds = Number.parseFloat(params.get('t'));
@@ -170,8 +187,15 @@ export function createMockBackend(params) {
   let cachedLyrics = 14;
   let sharingPaused = scenario === 'paused';
   const songOffsets = new Map();
-  const listeners = new Set();
+  /** Event name → callbacks. */
+  const listeners = new Map();
   let lastSent = '';
+  /** 'running', or during a restart 'stopped' and then 'started' (not looked yet). */
+  let engine = 'running';
+  let restarts = Promise.resolve();
+  let firstLook = 0;
+  /** Every config `save_settings` received, oldest first. */
+  const saved = [];
 
   let queueIndex = 0;
   let track = null;
@@ -201,7 +225,7 @@ export function createMockBackend(params) {
       return 0;
     }
     const elapsed = track.playing ? Date.now() - track.positionAtUnixMs : 0;
-    return Math.min(track.song.durationMs, Math.max(0, track.positionMs + elapsed));
+    return Math.min(track.song.durationMs ?? Infinity, Math.max(0, track.positionMs + elapsed));
   }
 
   function lyricsNow() {
@@ -231,11 +255,13 @@ export function createMockBackend(params) {
     if (isBlockedArtist(song.artist)) {
       return null;
     }
+    // Like `has_timing`: unsynced lines that all start at 0 cannot be placed.
     const usable =
       !config.privacy.title_only &&
       lyrics.state === 'found' &&
       !lyrics.instrumental &&
-      lyrics.lines.some((line) => line.text.trim())
+      lyrics.lines.some((line) => line.text.trim()) &&
+      (lyrics.synced || lyrics.lines.some((line) => line.startMs > 0))
         ? lyrics
         : null;
 
@@ -290,6 +316,18 @@ export function createMockBackend(params) {
 
   function buildView() {
     const source = { windows: 'windows-media', macos: 'macos', linux: 'mpris' }[os];
+    if (engine !== 'running') {
+      // View::stopped(None), then `running` once the new engine started.
+      return {
+        running: engine === 'started',
+        error: null,
+        source: '',
+        paused: sharingPaused,
+        now: null,
+        status: null,
+        targets: [],
+      };
+    }
     if (scenario === 'error') {
       return {
         running: false,
@@ -341,8 +379,14 @@ export function createMockBackend(params) {
     };
   }
 
+  function emit(event, payload) {
+    for (const callback of listeners.get(event) || []) {
+      callback(clone(payload));
+    }
+  }
+
   function tick() {
-    if (track && track.playing && position() >= track.song.durationMs) {
+    if (track && track.playing && track.song.durationMs && position() >= track.song.durationMs) {
       queueIndex = (queueIndex + 1) % plan.queue.length;
       startSong(queueIndex, 0);
     }
@@ -350,13 +394,57 @@ export function createMockBackend(params) {
     const json = JSON.stringify(view);
     if (json !== lastSent) {
       lastSent = json;
-      for (const callback of listeners) {
-        callback(clone(view));
-      }
+      emit('lyrix://view', view);
     }
   }
 
   setInterval(tick, TICK_MS);
+
+  /** A new engine runs; it looks (and finds the song) a little later. */
+  function launch() {
+    engine = 'started';
+    tick();
+    firstLook = setTimeout(() => {
+      engine = 'running';
+      if (track) {
+        lyricsReadyAt = Date.now() + RESTART.lookupMs;
+      }
+      tick();
+    }, RESTART.firstLookMs);
+  }
+
+  /** Like `Supervisor::restart`: one at a time, done once the new engine runs. */
+  function restart() {
+    restarts = restarts.then(async () => {
+      clearTimeout(firstLook);
+      engine = 'stopped';
+      tick();
+      await sleep(RESTART.stopMs);
+      launch();
+    });
+    return restarts;
+  }
+
+  // ?boot=<ms>: start like the app, with no engine for that long.
+  const boot = Number.parseInt(params.get('boot'), 10);
+  if (boot > 0) {
+    engine = 'stopped';
+    restarts = sleep(boot).then(launch);
+  }
+
+  // For checks in a browser (tools/flows.mjs); the app has no such thing.
+  window.lyrixDemo = {
+    /** Sends an event to the window, e.g. `lyrix://closing`. */
+    emit,
+    /** Changes the demo settings file, like an edit made outside the window. */
+    editSettings(path, value) {
+      const keys = path.split('.');
+      const last = keys.pop();
+      keys.reduce((node, key) => node[key], config)[last] = clone(value);
+    },
+    /** The configs `save_settings` received, oldest first. */
+    saved: () => clone(saved),
+  };
 
   const commands = {
     get_view: () => buildView(),
@@ -366,13 +454,14 @@ export function createMockBackend(params) {
       issues: validate(config),
       paths: demoPaths(os),
     }),
-    save_settings: ({ config: next }) => {
+    save_settings: async ({ config: next }) => {
+      saved.push(clone(next));
       const issues = validate(next);
       if (issues.some((issue) => issue.severity === 'error')) {
         return { saved: false, issues };
       }
       config = clone(next);
-      tick();
+      await restart();
       return { saved: true, issues };
     },
     preview_status: (args) => renderTemplate(args.template, args),
@@ -439,20 +528,19 @@ export function createMockBackend(params) {
             reject(`Unknown command: ${command}`);
             return;
           }
-          try {
-            resolve(clone(handler(clone(args))));
-          } catch (error) {
-            reject(String(error));
-          }
+          new Promise((done) => done(handler(clone(args)))).then(
+            (result) => resolve(clone(result)),
+            (error) => reject(String(error)),
+          );
         }, 16);
       });
     },
     listen(event, callback) {
-      if (event !== 'lyrix://view') {
-        return Promise.resolve(() => {});
+      if (!listeners.has(event)) {
+        listeners.set(event, new Set());
       }
-      listeners.add(callback);
-      return Promise.resolve(() => listeners.delete(callback));
+      listeners.get(event).add(callback);
+      return Promise.resolve(() => listeners.get(event).delete(callback));
     },
   };
 }

@@ -3,9 +3,13 @@
 
 import { attempt, h, setText } from './dom.js';
 import { icon } from './icons.js';
-import { discordOf, sharingSummary } from './view.js';
+import { discordOf, pendingLabel, pendingOf, sharingSummary } from './view.js';
 
 function placeholder(view) {
+  const pending = pendingLabel(view);
+  if (pending) {
+    return pending;
+  }
   if (!view.running) {
     return 'Nothing is shared while Lyrix is stopped';
   }
@@ -78,7 +82,7 @@ export function createLiveStrip({ api, navigate }) {
           'Resume',
         ),
       );
-    } else if (view.running && !discord) {
+    } else if (view.running && !discord && !pendingOf(view)) {
       setAction('connections', () =>
         h('button', { type: 'button', class: 'btn', onClick: () => navigate('connections') }, 'Connections'),
       );

@@ -88,6 +88,10 @@
   --ok: #3ee09b;
   --warn: #ffbb4d;
   --danger: #ff6f6f;
+  /* The three above at 22 % (no color-mix(): it needs Safari 16.2). */
+  --ok-glow: rgb(62 224 155 / 0.22);
+  --warn-glow: rgb(255 187 77 / 0.22);
+  --danger-glow: rgb(255 111 111 / 0.22);
   --idle: rgb(255 255 255 / 0.4);
   --warn-surface: rgb(255 187 77 / 0.12);
   --warn-border: rgb(255 187 77 / 0.28);
@@ -132,6 +136,9 @@
   --ok: #0f9d63;
   --warn: #c27400;
   --danger: #d33a3a;
+  --ok-glow: rgb(15 157 99 / 0.22);
+  --warn-glow: rgb(194 116 0 / 0.22);
+  --danger-glow: rgb(211 58 58 / 0.22);
   --idle: rgb(23 20 31 / 0.38);
   --warn-surface: rgb(255 170 40 / 0.14);
   --warn-border: rgb(194 116 0 / 0.3);

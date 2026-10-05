@@ -15,10 +15,13 @@ if (inApp) {
   invoke = (command, args) => tauri.core.invoke(command, args);
   listen = (event, callback) => tauri.event.listen(event, (message) => callback(message.payload));
 } else {
-  const { createMockBackend } = await import('./mock.js');
-  const mock = createMockBackend(new URLSearchParams(window.location.search));
-  invoke = mock.invoke;
-  listen = mock.listen;
+  // Loaded on first use: a top-level await would keep Safari 14 (macOS 11)
+  // from loading the window's modules.
+  const mock = import('./mock.js').then(({ createMockBackend }) =>
+    createMockBackend(new URLSearchParams(window.location.search)),
+  );
+  invoke = (command, args) => mock.then((backend) => backend.invoke(command, args));
+  listen = (event, callback) => mock.then((backend) => backend.listen(event, callback));
 }
 
 /** True when the window shows demo data instead of the app. */
@@ -58,4 +61,9 @@ export const api = {
    * @returns {Promise<() => void>} stops listening
    */
   onView: (callback) => listen('lyrix://view', callback),
+  /**
+   * Calls `callback()` on `lyrix://closing`: the window is about to be closed.
+   * @returns {Promise<() => void>} stops listening
+   */
+  onClosing: (callback) => listen('lyrix://closing', () => callback()),
 };

@@ -5,7 +5,7 @@ import { boundSwitch, boundText, group, issueSlot, pageHeader, row } from '../co
 import { formatTime, h, nextId, setText } from '../dom.js';
 import { icon } from '../icons.js';
 import { createCover } from '../now.js';
-import { discordOf, positionAt, sharingSummary } from '../view.js';
+import { discordOf, pendingLabel, pendingOf, positionAt, sharingSummary } from '../view.js';
 
 const PORTAL_URL = 'https://discord.com/developers/applications';
 
@@ -205,7 +205,7 @@ export function createConnectionsPage({ root, api, store, model, info }) {
     const discord = discordOf(view);
     const summary = sharingSummary(view);
     stateDot.dataset.tone = summary.tone;
-    setText(stateText, discord || !view.running ? summary.short : 'Off');
+    setText(stateText, discord || !view.running || pendingOf(view) ? summary.short : 'Off');
     stateText.title = discord?.detail || '';
 
     const ownId = model.get('discord.client_id');
@@ -216,7 +216,7 @@ export function createConnectionsPage({ root, api, store, model, info }) {
     } else {
       art.set(null, 'Lyrix');
     }
-    setText(details, view.status?.text || 'Nothing to show right now');
+    setText(details, view.status?.text || pendingLabel(view) || 'Nothing to show right now');
     details.classList.toggle('is-muted', !view.status);
     const estimated = view.status?.estimated ? ' (estimated timing)' : '';
     setText(state, now && view.status ? `${now.title} · ${now.artist}${estimated}` : 'Your status is clear');

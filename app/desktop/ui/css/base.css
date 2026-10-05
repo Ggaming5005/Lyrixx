@@ -81,7 +81,9 @@ svg {
   white-space: nowrap;
 }
 
-:focus {
+/* Where :focus-visible is unknown (Safari before 15.4) both rules are
+   dropped and the WebView's own focus ring stays. */
+:focus:not(:focus-visible) {
   outline: none;
 }
 
@@ -100,7 +102,10 @@ svg {
 
 .backdrop {
   position: fixed;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   z-index: 0;
   overflow: hidden;
   background: var(--bg);
@@ -109,7 +114,10 @@ svg {
 
 .backdrop-layer {
   position: absolute;
-  inset: -12%;
+  top: -12%;
+  right: -12%;
+  bottom: -12%;
+  left: -12%;
   background-position: center;
   background-size: cover;
   filter: var(--art-filter);
@@ -124,7 +132,10 @@ svg {
 
 .backdrop-art {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
 }
 
 .backdrop-img {
@@ -135,7 +146,10 @@ svg {
 
 .backdrop-scrim {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   background:
     radial-gradient(120% 90% at 70% 10%, transparent 0%, var(--scrim) 70%),
     var(--scrim);
@@ -143,7 +157,10 @@ svg {
 
 .backdrop-noise {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   background-image: url("../assets/noise.png");
   background-size: 128px 128px;
   opacity: var(--noise-opacity);

@@ -30,9 +30,11 @@ function breakItem() {
 }
 
 /**
- * Creates the lyrics list inside `viewport`. `setLines(lines, key)` replaces
- * the lyrics (only when `key` changes); `update(shiftedMs)` moves to the line
- * at that position (already shifted by the offsets).
+ * Creates the lyrics list inside `viewport`. `setLines(lines, key, { timed })`
+ * replaces the lyrics (only when `key` changes); `update(shiftedMs)` moves to
+ * the line at that position (already shifted by the offsets). Lyrics that are
+ * not `timed` (no line can be placed in time) are shown as an even list with
+ * no current line, which stays where the user scrolls it.
  */
 export function createLyricsView(viewport) {
   const track = h('div', { class: 'lyrics-track', role: 'list' });
@@ -40,6 +42,7 @@ export function createLyricsView(viewport) {
 
   let lines = [];
   let key = null;
+  let timed = true;
   /** Rendered rows: `{ el }`; breaks that follow each other share one row. */
   let items = [];
   /** Line index → row index. The intro, when shown, is row 0. */
@@ -49,19 +52,23 @@ export function createLyricsView(viewport) {
   let browse = 0;
   let browseTimer = 0;
 
-  function setLines(next, nextKey) {
+  function setLines(next, nextKey, options = {}) {
     if (nextKey === key) {
       return;
     }
     key = nextKey;
     lines = next;
+    timed = options.timed !== false;
     items = [];
     rowOf = new Map();
-    current = undefined;
+    current = timed ? undefined : -1;
     browse = 0;
+    clearTimeout(browseTimer);
+    viewport.classList.remove('is-browsing');
+    viewport.classList.toggle('is-untimed', !timed);
 
     const firstText = lines.findIndex((line) => line.text.trim() !== '');
-    hasIntro = firstText >= 0 && lines[firstText].startMs > 0;
+    hasIntro = timed && firstText >= 0 && lines[firstText].startMs > 0;
     if (hasIntro) {
       items.push({ el: breakItem(), isBreak: true });
     }
@@ -139,6 +146,9 @@ export function createLyricsView(viewport) {
   }
 
   function update(shiftedMs) {
+    if (!timed) {
+      return;
+    }
     const row = rowAt(shiftedMs);
     if (row !== current) {
       current = row;
@@ -160,11 +170,14 @@ export function createLyricsView(viewport) {
       }
       event.preventDefault();
       const height = track.offsetHeight;
-      browse = Math.max(-height, Math.min(height, browse - event.deltaY));
+      // Untimed lyrics start at the top, so they only scroll down.
+      browse = Math.max(-height, Math.min(timed ? height : 0, browse - event.deltaY));
       viewport.classList.add('is-browsing');
       position();
       clearTimeout(browseTimer);
-      browseTimer = setTimeout(endBrowsing, BROWSE_MS);
+      if (timed) {
+        browseTimer = setTimeout(endBrowsing, BROWSE_MS);
+      }
     },
     { passive: false },
   );

@@ -257,13 +257,74 @@ export function confirmDialog({ title, text, warning, confirmLabel = 'Continue',
   );
   return new Promise((resolve) => {
     let answer = false;
-    cancel.addEventListener('click', () => dialog.close());
+    const modal = openModal(dialog, () => resolve(answer));
+    cancel.addEventListener('click', () => modal.close());
     confirm.addEventListener('click', () => {
       answer = true;
-      dialog.close();
+      modal.close();
     });
-    dialog.addEventListener('close', () => resolve(answer), { once: true });
-    dialog.showModal();
     cancel.focus();
   });
+}
+
+/** The elements of `container` that Tab can reach. */
+function tabbable(container) {
+  return [...container.querySelectorAll('button, [href], input, select, textarea, [tabindex]')].filter(
+    (el) => !el.disabled && el.tabIndex >= 0 && el.getClientRects().length > 0,
+  );
+}
+
+/**
+ * Shows `dialog` as a modal and calls `onClose` once it closes (also on
+ * Escape). Returns `{ close }`. Uses `showModal()` where the WebView has it;
+ * Safari before 15.4 (macOS 11 and early 12) does not, so there it adds a
+ * backdrop itself, closes on Escape and keeps Tab inside the dialog.
+ */
+function openModal(dialog, onClose) {
+  if (typeof dialog.showModal === 'function') {
+    dialog.addEventListener('close', onClose, { once: true });
+    dialog.showModal();
+    return { close: () => dialog.close() };
+  }
+
+  const backdrop = h('div', { class: 'modal-backdrop', 'aria-hidden': 'true' });
+  const onKey = (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      close();
+    } else if (event.key === 'Tab') {
+      const items = tabbable(dialog);
+      if (items.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const inside = dialog.contains(document.activeElement);
+      if (event.shiftKey && (!inside || document.activeElement === first)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (!inside || document.activeElement === last)) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  };
+  function close() {
+    if (!dialog.hasAttribute('open')) {
+      return;
+    }
+    dialog.removeAttribute('open');
+    dialog.classList.remove('modal--fallback');
+    backdrop.remove();
+    document.removeEventListener('keydown', onKey, true);
+    onClose();
+  }
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.classList.add('modal--fallback');
+  dialog.before(backdrop);
+  dialog.setAttribute('open', '');
+  document.addEventListener('keydown', onKey, true);
+  return { close };
 }

@@ -23,6 +23,22 @@ function spread(lines, durationMs) {
   return lines.map((text, i) => ({ startMs: Math.floor(first + step * i), text }));
 }
 
+/** Plain lyrics (no timing) of one demo song. */
+const NORTHBOUND = [
+  'Pack the stars in a paper bag',
+  'Leave the porch light on for me',
+  'Every mile is a song we had',
+  'Humming low on the frozen sea',
+  'Northbound, northbound',
+  'Wheels are singing me to sleep',
+  'Northbound, northbound',
+  'Hold the quiet I can keep',
+  'Pines are counting all the cars',
+  'Snow is writing out your name',
+  'I will meet you where you are',
+  'Northbound, all the same',
+];
+
 function svgUrl(svg) {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg.replace(/\s*\n\s*/g, ' ').trim())}`;
 }
@@ -241,23 +257,7 @@ export const SONGS = [
       synced: false,
       instrumental: false,
       source: 'lrclib',
-      lines: spread(
-        [
-          'Pack the stars in a paper bag',
-          'Leave the porch light on for me',
-          'Every mile is a song we had',
-          'Humming low on the frozen sea',
-          'Northbound, northbound',
-          'Wheels are singing me to sleep',
-          'Northbound, northbound',
-          'Hold the quiet I can keep',
-          'Pines are counting all the cars',
-          'Snow is writing out your name',
-          'I will meet you where you are',
-          'Northbound, all the same',
-        ],
-        196_000,
-      ),
+      lines: spread(NORTHBOUND, 196_000),
     },
   },
   {
@@ -268,6 +268,23 @@ export const SONGS = [
     artwork: COVERS.driftwood,
     player: 'spotify',
     lyrics: { state: 'found', synced: true, instrumental: true, source: 'lrclib', lines: [] },
+  },
+  {
+    // A stream in the browser that reports no length, with a plain .txt:
+    // nothing can spread the lines, so they all start at 0.
+    title: 'Northbound Lullaby (Live)',
+    artist: 'Ada Winterline',
+    album: null,
+    durationMs: null,
+    artwork: COVERS.northbound,
+    player: 'browser',
+    lyrics: {
+      state: 'found',
+      synced: false,
+      instrumental: false,
+      source: 'local',
+      lines: NORTHBOUND.map((text) => ({ startMs: 0, text })),
+    },
   },
 ];
 

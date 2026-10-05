@@ -1,7 +1,8 @@
 // Now Playing: the cover, the song, a live progress bar, the lyrics timing
 // nudge, karaoke lyrics and the live status strip, plus a designed look for
 // every other moment (searching, no lyrics, instrumental, nothing playing,
-// Lyrix stopped).
+// starting, Lyrix stopped). During a restart the store keeps the last song,
+// so it stays on screen.
 
 import { openFolder } from './actions.js';
 import { seedGradient, seedHue } from './backdrop.js';
@@ -9,7 +10,7 @@ import { appName, attempt, fill, formatOffset, formatTime, h, setText, sourceNam
 import { icon, lyrixGlyph } from './icons.js';
 import { createLiveStrip } from './live.js';
 import { createLyricsView } from './lyrics-view.js';
-import { positionAt, totalOffset } from './view.js';
+import { hasTiming, pendingOf, positionAt, totalOffset } from './view.js';
 
 const STEP_MS = 250;
 
@@ -80,6 +81,26 @@ export function createNowPage({ root, api, store, backdrop, navigate }) {
 
   const offsetValue = h('span', { class: 'stepper-value', 'aria-live': 'polite' });
   const timingHint = h('div', { class: 'timing-hint' });
+  const earlierButton = h(
+    'button',
+    {
+      type: 'button',
+      'aria-label': 'Show lyrics 0.25 seconds earlier',
+      title: 'Earlier',
+      onClick: () => changeOffset(api.adjustOffset(-STEP_MS)),
+    },
+    icon('minus'),
+  );
+  const laterButton = h(
+    'button',
+    {
+      type: 'button',
+      'aria-label': 'Show lyrics 0.25 seconds later',
+      title: 'Later',
+      onClick: () => changeOffset(api.adjustOffset(STEP_MS)),
+    },
+    icon('plus'),
+  );
   const resetButton = h(
     'button',
     {
@@ -104,31 +125,7 @@ export function createNowPage({ root, api, store, backdrop, navigate }) {
       'div',
       { class: 'timing-controls', role: 'group', 'aria-labelledby': 'timing-label' },
       resetButton,
-      h(
-        'div',
-        { class: 'stepper' },
-        h(
-          'button',
-          {
-            type: 'button',
-            'aria-label': 'Show lyrics 0.25 seconds earlier',
-            title: 'Earlier',
-            onClick: () => changeOffset(api.adjustOffset(-STEP_MS)),
-          },
-          icon('minus'),
-        ),
-        offsetValue,
-        h(
-          'button',
-          {
-            type: 'button',
-            'aria-label': 'Show lyrics 0.25 seconds later',
-            title: 'Later',
-            onClick: () => changeOffset(api.adjustOffset(STEP_MS)),
-          },
-          icon('plus'),
-        ),
-      ),
+      h('div', { class: 'stepper' }, earlierButton, offsetValue, laterButton),
     ),
   );
 
@@ -196,7 +193,12 @@ export function createNowPage({ root, api, store, backdrop, navigate }) {
     lyricsState.hidden = true;
     stateKey = null;
     const { lines, synced, source } = now.lyrics;
-    lyrics.setLines(lines, `${now.songKey}|${source}|${synced}|${lines.length}|${lines[lines.length - 1]?.startMs}`);
+    const timed = hasTiming(now.lyrics);
+    lyrics.setLines(
+      lines,
+      `${now.songKey}|${source}|${synced}|${timed}|${lines.length}|${lines[lines.length - 1]?.startMs}`,
+      { timed },
+    );
   }
 
   const statusQuote = (view) => (view.status?.text ? h('q', { class: 'selectable', text: view.status.text }) : null);
@@ -206,8 +208,11 @@ export function createNowPage({ root, api, store, backdrop, navigate }) {
     const state = now.lyrics.state;
     const found = state === 'found';
 
+    // Unsynced lyrics spread over the song are marked as estimated; those of a
+    // song with no known length have no timing at all, so no mark.
+    const estimated = found && !now.lyrics.synced && hasTiming(now.lyrics);
     const nextHeadKey = found
-      ? `${now.lyrics.source}|${now.lyrics.synced}|${now.lyrics.instrumental}`
+      ? `${now.lyrics.source}|${estimated}|${now.lyrics.instrumental}|${now.lyrics.lines.length > 0}`
       : state;
     if (nextHeadKey !== headKey) {
       headKey = nextHeadKey;
@@ -224,7 +229,7 @@ export function createNowPage({ root, api, store, backdrop, navigate }) {
             `Lyrics from ${sourceName(now.lyrics.source)}`,
           ),
         );
-        if (!now.lyrics.synced) {
+        if (estimated) {
           parts.push(
             h(
               'span',
@@ -314,8 +319,10 @@ export function createNowPage({ root, api, store, backdrop, navigate }) {
     }
   }
 
-  function renderIdle() {
-    showEmpty('idle', () => [
+  function renderIdle(view) {
+    // Starting: the engine has not looked yet, so do not say nothing plays.
+    const starting = pendingOf(view) === 'starting';
+    showEmpty(starting ? 'starting' : 'idle', () => [
       h(
         'div',
         { class: 'empty-art', 'aria-hidden': 'true' },
@@ -324,10 +331,12 @@ export function createNowPage({ root, api, store, backdrop, navigate }) {
         h('span', { class: 'ring' }),
         h('img', { class: 'empty-logo', src: 'assets/logo.svg', alt: '' }),
       ),
-      h('h1', { class: 'empty-title', text: 'Nothing playing' }),
+      h('h1', { class: 'empty-title', text: starting ? 'Starting…' : 'Nothing playing' }),
       h('p', {
         class: 'empty-text',
-        text: 'Play something in Spotify, YouTube, Apple Music or any player. Lyrix picks it up within a second.',
+        text: starting
+          ? 'Lyrix is getting ready to follow your music.'
+          : 'Play something in Spotify, YouTube, Apple Music or any player. Lyrix picks it up within a second.',
       }),
     ]);
   }
@@ -386,25 +395,31 @@ export function createNowPage({ root, api, store, backdrop, navigate }) {
     progress.setAttribute('aria-valuemax', String(Math.round((now.durationMs || 0) / 1000)));
 
     showOffset(now.songOffsetMs, now.globalOffsetMs);
-    // The timing nudge only means something when there are lines to move. It
-    // keeps its space so the cover does not jump when lyrics arrive.
-    const hasLines = now.lyrics.state === 'found' && !now.lyrics.instrumental && now.lyrics.lines.length > 0;
+    // The timing nudge only means something when there are timed lines to
+    // move. It keeps its space so the cover does not jump when lyrics arrive.
+    const hasLines =
+      now.lyrics.state === 'found' && !now.lyrics.instrumental && now.lyrics.lines.length > 0 && hasTiming(now.lyrics);
     timing.style.visibility = hasLines ? '' : 'hidden';
+    // While the engine restarts it has no song to adjust yet.
+    for (const button of [earlierButton, laterButton, resetButton]) {
+      button.disabled = Boolean(pendingOf(view));
+    }
 
     renderLyrics(view);
   }
 
   function render(view) {
     root.dataset.playing = String(Boolean(view.now?.playing));
-    if (!view.running) {
+    if (!view.running && view.error) {
       backdrop.showBrand();
       renderStopped(view);
-    } else if (!view.now) {
-      backdrop.showBrand();
-      renderIdle();
-    } else {
+    } else if (view.now) {
+      // Also while the engine restarts: the store keeps the last song.
       backdrop.show({ artwork: view.now.artwork, seed: songSeed(view.now) });
       renderSong(view);
+    } else {
+      backdrop.showBrand();
+      renderIdle(view);
     }
     live.render(view);
     lastRatio = -1;

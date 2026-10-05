@@ -15,7 +15,7 @@ import {
 } from '../controls.js';
 import { attempt, debounce, formatOffset, h, nextId, setText, toast } from '../dom.js';
 import { icon } from '../icons.js';
-import { lyricMoment, positionAt, totalOffset } from '../view.js';
+import { hasTiming, lyricMoment, positionAt, totalOffset } from '../view.js';
 
 const REPO_URL = 'https://github.com/Ggaming5005/Lyrixx';
 const SAMPLE = {
@@ -29,14 +29,17 @@ const SAMPLE = {
 /** Settings whose issues show next to their own field (here or on another page). */
 const SHOWN_BY_FIELDS = /^(status\.line_template|status\.no_lyrics_template|discord\.client_id|advanced\.)/;
 
-/** The values a preview uses: the song playing now, or a sample. */
+/**
+ * The values a preview uses: the song playing now, or a sample. Its lyrics
+ * give `line` and `next` only when they have timing, like the engine's.
+ */
 function previewContext(view) {
   const now = view?.now;
   if (!now) {
     return SAMPLE;
   }
   const ctx = { title: now.title, artist: now.artist, album: now.album || undefined, line: SAMPLE.line, next: SAMPLE.next };
-  if (now.lyrics.state === 'found' && now.lyrics.lines.length > 0) {
+  if (now.lyrics.state === 'found' && now.lyrics.lines.length > 0 && hasTiming(now.lyrics)) {
     const { lines } = now.lyrics;
     const shifted = positionAt(now) - totalOffset(now);
     const moment = lyricMoment(lines, shifted);
@@ -81,11 +84,14 @@ function templateRow(model, path, { title, desc, onFocus }) {
 
 export function createSettingsPage({ root, api, store, model, info }) {
   // Status text -------------------------------------------------------------------
+  // What each template gets, like `compose_status`: a line and the next one
+  // while singing, only the next line in an intro or break, and neither
+  // without lyrics. (Leaving a key out sends no value.)
   const previews = [
-    ['While singing', 'status.line_template'],
-    ['No lyrics', 'status.no_lyrics_template'],
-    ['Intro or break', 'status.instrumental_text'],
-  ].map(([when, path]) => ({ when, path, text: h('div', { class: 'preview-text selectable' }) }));
+    ['While singing', 'status.line_template', (ctx) => ctx],
+    ['No lyrics', 'status.no_lyrics_template', (ctx) => ({ ...ctx, line: undefined, next: undefined })],
+    ['Intro or break', 'status.instrumental_text', (ctx) => ({ ...ctx, line: undefined })],
+  ].map(([when, path, context]) => ({ when, path, context, text: h('div', { class: 'preview-text selectable' }) }));
 
   const previewCard = h(
     'div',
@@ -101,8 +107,8 @@ export function createSettingsPage({ root, api, store, model, info }) {
     const token = ++previewToken;
     const ctx = previewContext(store.get());
     const results = await Promise.all(
-      previews.map(({ path }) =>
-        api.previewStatus({ template: model.get(path) || '', ...ctx }).catch(() => null),
+      previews.map(({ path, context }) =>
+        api.previewStatus({ ...context(ctx), template: model.get(path) || '' }).catch(() => null),
       ),
     );
     if (token !== previewToken) {

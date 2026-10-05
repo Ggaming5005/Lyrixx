@@ -268,6 +268,14 @@
   height: 16px;
 }
 
+.stepper button:disabled,
+.icon-btn:disabled {
+  cursor: default;
+  opacity: 0.4;
+  background: transparent;
+  color: var(--text-2);
+}
+
 .stepper-value {
   min-width: 76px;
   padding: 0 var(--sp-1);
@@ -429,17 +437,17 @@
 
 .dot[data-tone="ok"] {
   background: var(--ok);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent);
+  box-shadow: 0 0 0 3px var(--ok-glow);
 }
 
 .dot[data-tone="warn"] {
   background: var(--warn);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 22%, transparent);
+  box-shadow: 0 0 0 3px var(--warn-glow);
 }
 
 .dot[data-tone="danger"] {
   background: var(--danger);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 22%, transparent);
+  box-shadow: 0 0 0 3px var(--danger-glow);
 }
 
 /* ---------------------------------------------------------------------------
@@ -721,10 +729,44 @@
   animation: modal-in var(--dur-slow) var(--ease-out);
 }
 
+/* Without <dialog> support (Safari before 15.4) it would show inline. */
+.modal:not([open]) {
+  display: none;
+}
+
 .modal::backdrop {
   background: rgb(6 4 10 / 0.5);
   -webkit-backdrop-filter: blur(4px);
   backdrop-filter: blur(4px);
+}
+
+/* The stand-in for showModal() where it is missing (controls.js openModal). */
+.modal-backdrop {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 900;
+  background: rgb(6 4 10 / 0.5);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+
+.modal--fallback {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 901;
+  display: block;
+  max-height: calc(100vh - 48px);
+  margin: 0;
+  overflow: auto;
+  transform: translate(-50%, -50%);
+}
+
+.modal--fallback[open] {
+  animation: none;
 }
 
 @keyframes modal-in {

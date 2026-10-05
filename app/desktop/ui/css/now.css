@@ -31,7 +31,6 @@
   position: relative;
   /* Leaves room for the song, progress and timing below in short windows. */
   width: max(112px, min(100%, calc(100vh - 420px - var(--titlebar-h))));
-  aspect-ratio: 1 / 1;
   flex: none;
   overflow: hidden;
   border-radius: var(--r-lg);
@@ -42,10 +41,20 @@
     box-shadow var(--dur-slow) var(--ease-out);
 }
 
+/* Keeps the cover square (aspect-ratio needs Safari 15; macOS 11 may have 14). */
+.cover::before {
+  content: "";
+  display: block;
+  padding-top: 100%;
+}
+
 .cover::after {
   content: "";
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   border-radius: inherit;
   box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.08);
   pointer-events: none;
@@ -54,7 +63,10 @@
 .cover-img,
 .cover-generated {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -270,6 +282,7 @@
     transform var(--dur-slow) var(--ease-out),
     filter var(--dur-slow) var(--ease),
     text-shadow var(--dur-slow) var(--ease);
+  word-break: break-word;
   overflow-wrap: anywhere;
 }
 
@@ -279,6 +292,12 @@
 
 .lyrics-viewport.is-browsing .lyric {
   --b: 0px;
+}
+
+/* Lyrics with no timing: an even list, no current line. */
+.lyrics-viewport.is-untimed .lyric {
+  --o: 0.72;
+  --s: 0.86;
 }
 
 :root[data-theme="light"] .lyric.is-current {
@@ -595,7 +614,10 @@
 
 .empty-art .ring {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   border: 1.5px solid var(--border);
   border-radius: 50%;
   animation: ring 4.8s var(--ease) infinite;
@@ -735,7 +757,7 @@
   50% {
     box-shadow:
       0 0 0 3px var(--bg),
-      0 0 0 7px color-mix(in srgb, var(--ok) 25%, transparent);
+      0 0 0 7px var(--ok-glow);
   }
 }
 

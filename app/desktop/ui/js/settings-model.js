@@ -51,19 +51,20 @@ export function createSettingsModel(api) {
   let settings = null;
   let config = null;
   let issues = [];
-  let saving = false;
+  /** `save_settings` calls not answered yet. */
+  let inFlight = 0;
+  /** A save was asked for while another was in flight. */
   let again = false;
+  /** Changes not sent yet. */
   let dirty = false;
   const subscribers = new Set();
 
   const emit = () => subscribers.forEach((callback) => callback());
+  const pending = () => dirty || again || inFlight > 0;
 
-  async function save() {
-    if (saving) {
-      again = true;
-      return;
-    }
-    saving = true;
+  /** Sends the whole settings as they are now. */
+  async function send() {
+    inFlight += 1;
     dirty = false;
     try {
       const result = await api.saveSettings(clone(config));
@@ -76,13 +77,22 @@ export function createSettingsModel(api) {
     } catch (error) {
       toast(`Could not save: ${error}`, { tone: 'error' });
     } finally {
-      saving = false;
+      inFlight -= 1;
       emit();
-      if (again) {
+      if (again && inFlight === 0) {
         again = false;
-        save();
+        send();
       }
     }
+  }
+
+  /** Saves one at a time: a save asked for meanwhile runs after it, once. */
+  function save() {
+    if (inFlight > 0) {
+      again = true;
+      return;
+    }
+    send();
   }
 
   const scheduleSave = debounce(save, SAVE_DELAY_MS);
@@ -93,6 +103,42 @@ export function createSettingsModel(api) {
       config = clone(settings.config);
       issues = settings.issues || [];
       emit();
+    },
+    /**
+     * Loads the settings again (they may have been edited in the file), unless
+     * a change is waiting or being saved, which would be lost.
+     */
+    async reload() {
+      if (!config || pending()) {
+        return;
+      }
+      const fresh = await api.getSettings();
+      if (pending()) {
+        return;
+      }
+      const same =
+        JSON.stringify(fresh.config) === JSON.stringify(config) &&
+        JSON.stringify(fresh.issues || []) === JSON.stringify(issues) &&
+        JSON.stringify(fresh.paths) === JSON.stringify(settings.paths);
+      settings = fresh;
+      if (!same) {
+        config = clone(fresh.config);
+        issues = fresh.issues || [];
+        emit();
+      }
+    },
+    /**
+     * Sends a waiting change at once, without waiting for the pause or for a
+     * save in flight (that one already sent its settings): the window is
+     * closing.
+     */
+    flushNow() {
+      scheduleSave.cancel();
+      if (!dirty && !again) {
+        return;
+      }
+      again = false;
+      send();
     },
     get loaded() {
       return config !== null;
