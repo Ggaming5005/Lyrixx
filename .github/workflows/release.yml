@@ -2,6 +2,11 @@ name: Release
 
 # Builds the Lyrix installers for Windows, macOS and Linux into a draft
 # GitHub release. Publish the draft by hand once it looks right.
+#
+# Pushing a tag `vX.Y.Z` fills the draft for that tag. A run started by hand
+# (Run workflow) is a trial: it fills a draft of its own, tagged
+# `vX.Y.Z-manual.<run number>`, and never touches the release of `vX.Y.Z`,
+# whose installers it would otherwise replace even once published.
 on:
   push:
     tags: ["v*"]
@@ -55,9 +60,10 @@ jobs:
           projectPath: app/desktop
           tauriScript: npx --yes @tauri-apps/cli@2
           args: ${{ matrix.args }}
-          # The pushed tag, or (run by hand) one named after the app's version.
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
-          releaseName: "Lyrix v__VERSION__"
+          # The pushed tag, or (run by hand) a trial tag of the run's own: the
+          # action reuses any release with the same tag, published or not.
+          tagName: ${{ github.event_name == 'push' && github.ref_name || format('v__VERSION__-manual.{0}', github.run_number) }}
+          releaseName: ${{ github.event_name == 'push' && 'Lyrix v__VERSION__' || format('Lyrix v__VERSION__ (manual build {0})', github.run_number) }}
           releaseBody: |
             Lyrix shows the lyric line you're hearing as your Discord status.
 
@@ -67,4 +73,5 @@ jobs:
 
             The app is not code-signed yet, so Windows and macOS may warn the first time you open it.
           releaseDraft: true
-          prerelease: false
+          # A trial published by mistake never becomes the latest release.
+          prerelease: ${{ github.event_name != 'push' }}
