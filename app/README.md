@@ -93,6 +93,9 @@ cd app
 cargo test                 # unit tests
 cargo clippy --all-targets -- -D warnings
 cargo test --lib sources:: -- --ignored   # Linux: MPRIS tests against a private D-Bus
+cargo test --test e2e_linux -- --nocapture   # Linux: the real binary end to end (needs dbus-daemon, else skipped)
 ```
+
+The end-to-end test (also part of `cargo test` on Linux) runs `lyrix now`, `lyrix run` and `lyrix lyrics` against a private D-Bus with a fake MPRIS player, a mock LRCLIB server and a fake Discord IPC socket, all local.
 
 CI runs format, lint, tests and a release build on Windows, macOS and Linux, and uploads each binary.

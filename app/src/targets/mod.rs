@@ -39,4 +39,12 @@ pub trait StatusTarget: Send {
 
     /// Removes the status (restoring whatever the user had, where possible).
     async fn clear(&mut self) -> Result<(), TargetError>;
+
+    /// True when what the last `set` showed is gone although nothing was
+    /// sent (Discord restarted and dropped it), so the engine sends the
+    /// current status again. Called on every poll; it must answer at once
+    /// and not connect. The default: a status is never lost.
+    async fn status_lost(&mut self) -> bool {
+        false
+    }
 }

@@ -341,6 +341,47 @@ impl Connection {
         }
     }
 
+    /// True once Discord has closed the connection, found without waiting:
+    /// reads only what has already arrived, answers pings in it, drops other
+    /// frames (no request is waiting for them), and reports the end of the
+    /// stream, a close frame, a read or write error or garbage as closed.
+    async fn closed_while_idle(&mut self) -> bool {
+        loop {
+            loop {
+                match decode_frame(&self.buf) {
+                    Ok(Some((opcode, payload, used))) => {
+                        let used = used.min(self.buf.len());
+                        self.buf.drain(..used);
+                        match opcode {
+                            OP_CLOSE => return true,
+                            OP_PING => {
+                                let answered = self.send(OP_PONG, &payload).await;
+                                if answered.is_err() {
+                                    return true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => return true,
+                }
+            }
+            self.buf.reserve(4096);
+            let mut read = std::pin::pin!(self.stream.read_buf(&mut self.buf));
+            // Poll the read once: `Pending` means nothing more has arrived.
+            let polled = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(std::future::Future::poll(read.as_mut(), cx))
+            })
+            .await;
+            match polled {
+                std::task::Poll::Pending => return false,
+                std::task::Poll::Ready(Ok(0)) | std::task::Poll::Ready(Err(_)) => return true,
+                std::task::Poll::Ready(Ok(_)) => {}
+            }
+        }
+    }
+
     /// Sends a command and returns Discord's reply with the same nonce,
     /// skipping unrelated frames.
     async fn request(&mut self, payload: &Value, nonce: &str) -> Result<Value, IpcError> {
@@ -359,15 +400,6 @@ impl Connection {
 enum Failure {
     Unauthorized(String),
     Unavailable(String),
-}
-
-impl Failure {
-    fn to_error(&self) -> TargetError {
-        match self {
-            Failure::Unauthorized(m) => TargetError::Unauthorized(m.clone()),
-            Failure::Unavailable(m) => TargetError::Unavailable(m.clone()),
-        }
-    }
 }
 
 /// The socket paths to try on Unix, in order: every `discord-ipc-N` slot (lowest
@@ -598,9 +630,8 @@ impl DiscordRpcTarget {
         }
         let now = Instant::now();
         if let Some(last) = self.last_attempt {
-            let waited = now.saturating_duration_since(last);
-            if waited < self.reconnect_every {
-                return Err(self.waiting_error(self.reconnect_every.saturating_sub(waited)));
+            if now.saturating_duration_since(last) < self.reconnect_every {
+                return Err(self.waiting_error());
             }
         }
         self.last_attempt = Some(now);
@@ -621,23 +652,26 @@ impl DiscordRpcTarget {
             }
             Err(failure) => {
                 tracing::debug!(?failure, "could not connect to Discord");
-                let error = failure.to_error();
                 self.last_failure = Some(failure);
-                Err(error)
+                Err(self.waiting_error())
             }
         }
     }
 
-    /// The error while waiting `wait` before the next connection attempt.
-    fn waiting_error(&self, wait: Duration) -> TargetError {
-        let seconds = wait.as_millis().div_ceil(1000);
+    /// The error for a failed connection attempt and, until the next attempt,
+    /// for every update. It reads the same each time (no countdown), so the
+    /// engine, which retries every second and logs a repeated message only
+    /// once a minute, does not print a new warning every second while
+    /// Discord is closed.
+    fn waiting_error(&self) -> TargetError {
+        let every = self.reconnect_every.as_millis().div_ceil(1000);
         match &self.last_failure {
             Some(Failure::Unauthorized(m)) => TargetError::Unauthorized(m.clone()),
             Some(Failure::Unavailable(m)) => {
-                TargetError::Unavailable(format!("{m}; trying again in {seconds} s"))
+                TargetError::Unavailable(format!("{m}; trying again every {every} s"))
             }
             None => TargetError::Unavailable(format!(
-                "not connected to Discord; trying again in {seconds} s"
+                "not connected to Discord; trying again every {every} s"
             )),
         }
     }
@@ -710,6 +744,26 @@ impl StatusTarget for DiscordRpcTarget {
             return Ok(());
         }
         self.send_activity(Value::Null).await
+    }
+
+    /// Discord drops the activity when it closes the connection (a restart,
+    /// an update, quitting), and nothing else would notice until the status
+    /// changes. When the open connection turns out to be closed, it is
+    /// dropped (the next `set` reconnects, at most every [`RECONNECT_EVERY`])
+    /// and this returns true. Only reads what has already arrived (answering
+    /// a ping there may wait up to the request timeout), and never connects.
+    async fn status_lost(&mut self) -> bool {
+        let Some(conn) = self.conn.as_mut() else {
+            return false;
+        };
+        let timeout = self.request_timeout;
+        let closed = tokio::time::timeout(timeout, conn.closed_while_idle())
+            .await
+            .unwrap_or(true);
+        if closed {
+            self.disconnect("Discord closed the connection".to_string());
+        }
+        closed
     }
 }
 
@@ -1042,19 +1096,29 @@ mod tests {
     #[test]
     fn waiting_error_repeats_the_last_failure() {
         let mut target = DiscordRpcTarget::new("1", Duration::ZERO, true);
-        match target.waiting_error(Duration::from_millis(1_001)) {
-            TargetError::Unavailable(m) => assert!(m.ends_with("trying again in 2 s"), "{m}"),
-            other => panic!("{other:?}"),
-        }
-        target.last_failure = Some(Failure::Unavailable("Discord is not running".into()));
-        match target.waiting_error(Duration::ZERO) {
+        match target.waiting_error() {
             TargetError::Unavailable(m) => {
-                assert_eq!(m, "Discord is not running; trying again in 0 s")
+                assert_eq!(m, "not connected to Discord; trying again every 15 s")
             }
             other => panic!("{other:?}"),
         }
+        target.last_failure = Some(Failure::Unavailable("Discord is not running".into()));
+        match target.waiting_error() {
+            TargetError::Unavailable(m) => {
+                assert_eq!(m, "Discord is not running; trying again every 15 s")
+            }
+            other => panic!("{other:?}"),
+        }
+        let target = target.with_reconnect_every(Duration::from_millis(1_001));
+        match target.waiting_error() {
+            TargetError::Unavailable(m) => {
+                assert_eq!(m, "Discord is not running; trying again every 2 s")
+            }
+            other => panic!("{other:?}"),
+        }
+        let mut target = target;
         target.last_failure = Some(Failure::Unauthorized("bad id".into()));
-        match target.waiting_error(Duration::from_secs(3)) {
+        match target.waiting_error() {
             TargetError::Unauthorized(m) => assert_eq!(m, "bad id"),
             other => panic!("{other:?}"),
         }
@@ -1242,6 +1306,11 @@ mod tests {
             SilentHandshake,
             /// Answers requests with an oversize frame header.
             GarbageReply,
+            /// Answers each request, then pings and expects a pong.
+            PingWhenIdle,
+            /// Answers each request, then sends a close frame but keeps the
+            /// connection open.
+            CloseWhenIdle,
         }
 
         pub struct FakeDiscord {
@@ -1469,6 +1538,17 @@ mod tests {
                                 write(stream, OP_FRAME, error).await?;
                             }
                             Script::NeverReply => {}
+                            Script::PingWhenIdle => {
+                                write(stream, OP_FRAME, reply).await?;
+                                let ping = json!({"idle": true});
+                                write(stream, OP_PING, ping.clone()).await?;
+                                expect_pong(stream, buf, frames, &ping).await?;
+                            }
+                            Script::CloseWhenIdle => {
+                                write(stream, OP_FRAME, reply).await?;
+                                let close = json!({"code": 1000, "message": "Bye"});
+                                write(stream, OP_CLOSE, close).await?;
+                            }
                             Script::GarbageReply => {
                                 let header = [1u8, 0, 0, 0, 0, 0, 0x10, 0];
                                 stream.write_all(&header).await.ok()?;
@@ -1825,11 +1905,18 @@ mod tests {
                 other => panic!("expected Unavailable, got {other:?}"),
             }
 
-            // Discord starts, but the target waits RECONNECT_EVERY before looking again.
+            // Discord starts, but the target waits RECONNECT_EVERY before looking
+            // again. Meanwhile every update gets the same error as the failed
+            // attempt (no countdown), so the engine logs it once, not every second.
             let fake = FakeDiscord::start_at(&path, Script::Normal);
-            let err = target.set(&status("x line")).await.unwrap_err();
+            for _ in 0..3 {
+                let again = target.set(&status("x line")).await.unwrap_err();
+                assert_eq!(again.to_string(), err.to_string());
+            }
             match &err {
-                TargetError::Unavailable(m) => assert!(m.contains("trying again in"), "{m}"),
+                TargetError::Unavailable(m) => {
+                    assert!(m.ends_with("; trying again every 15 s"), "{m}")
+                }
                 other => panic!("expected Unavailable, got {other:?}"),
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1942,6 +2029,80 @@ mod tests {
             );
             // Keep the temp dir alive until the end.
             drop(fake);
+        }
+
+        #[tokio::test]
+        async fn status_lost_notices_that_discord_went_away() {
+            let fake = FakeDiscord::start(Script::Normal);
+            let path = fake.path.clone();
+            let mut target = target_for(&fake).with_reconnect_every(Duration::ZERO);
+            // Never connected: nothing to lose, and no connection is made.
+            assert!(!target.status_lost().await);
+            assert_eq!(fake.accepted(), 0);
+
+            target.set(&status("x line")).await.unwrap();
+            // Open and idle: still showing.
+            for _ in 0..3 {
+                assert!(!target.status_lost().await);
+            }
+            assert!(target.is_connected());
+
+            // Discord quits: the activity is gone, and the next check says so.
+            fake.stop().await;
+            assert!(target.status_lost().await);
+            assert!(!target.is_connected());
+            assert!(!target.status_lost().await);
+
+            // Once Discord is back, the next update reconnects.
+            let restarted = FakeDiscord::start_at(&path, Script::Normal);
+            target.set(&status("x line")).await.unwrap();
+            assert_eq!(restarted.accepted(), 1);
+            assert_eq!(
+                restarted.requests()[0]["args"]["activity"]["details"],
+                "x line"
+            );
+            drop(fake);
+        }
+
+        #[tokio::test]
+        async fn status_lost_answers_pings_while_idle() {
+            let fake = FakeDiscord::start(Script::PingWhenIdle);
+            let mut target = target_for(&fake);
+            target.set(&status("x line")).await.unwrap();
+            // Wait for the ping to arrive.
+            for _ in 0..100 {
+                assert!(!target.status_lost().await);
+                if fake.frames().iter().any(|(op, _)| *op == OP_PONG) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                fake.frames().contains(&(OP_PONG, json!({"idle": true}))),
+                "{:?}",
+                fake.frames()
+            );
+            assert!(target.is_connected());
+            // The connection still works.
+            target.set(&status("y line")).await.unwrap();
+            assert_eq!(fake.requests().len(), 2);
+        }
+
+        #[tokio::test]
+        async fn status_lost_after_a_close_frame() {
+            let fake = FakeDiscord::start(Script::CloseWhenIdle);
+            let mut target = target_for(&fake);
+            target.set(&status("x line")).await.unwrap();
+            let mut lost = false;
+            for _ in 0..100 {
+                if target.status_lost().await {
+                    lost = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(lost, "a close frame means the activity is gone");
+            assert!(!target.is_connected());
         }
 
         #[tokio::test]

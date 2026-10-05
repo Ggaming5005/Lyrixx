@@ -75,6 +75,9 @@ const MIN_POLL_INTERVAL_MS: u64 = 100;
 ///   again whenever it changes (checked on every poll), so `lyrix offset`
 ///   applies to the song playing now.
 /// - The pause marker is checked on every poll.
+/// - On every poll each target is asked whether it lost what it showed
+///   ([`StatusTarget::status_lost`], e.g. Discord restarted); one that did is
+///   sent the current status again, even though it did not change.
 /// - Paused playback is composed with `playing = false`, so the status follows
 ///   `status.show_when_paused`.
 /// - The source is read alongside rendering, one read at a time: a slow or
@@ -211,6 +214,7 @@ impl Engine {
                 () = tokio::time::sleep_until(deadline) => Wake::Render,
             };
 
+            let polled = matches!(wake, Wake::Poll);
             match wake {
                 Wake::Poll => {
                     state.check_pause_marker();
@@ -233,7 +237,12 @@ impl Engine {
             running = tokio::select! {
                 biased;
                 () = &mut shutdown => false,
-                () = flush(&mut slots, &state) => true,
+                () = async {
+                    if polled {
+                        resend_lost(&mut slots).await;
+                    }
+                    flush(&mut slots, &state).await;
+                } => true,
             };
         }
         // Abandon a read that is still under way.
@@ -641,6 +650,21 @@ impl Slot {
     }
 }
 
+/// Asks every target whether it lost its status
+/// ([`StatusTarget::status_lost`]). One that lost a status it was showing
+/// gets the current status again: its pacer forgets what it sent.
+async fn resend_lost(slots: &mut [Slot]) {
+    for slot in slots.iter_mut().filter(|s| s.enabled) {
+        if slot.target.status_lost().await && matches!(slot.pacer.last_sent(), Some(Some(_))) {
+            tracing::info!(
+                target_name = slot.name,
+                "the status was lost, showing it again"
+            );
+            slot.pacer.reset();
+        }
+    }
+}
+
 /// Offers the desired status to every target's pacer and sends what is ready.
 async fn flush(slots: &mut [Slot], state: &State<'_>) {
     for slot in slots.iter_mut().filter(|s| s.enabled) {
@@ -977,6 +1001,10 @@ mod tests {
         starts: Vec<(u64, Option<u64>)>,
         replies: VecDeque<Reply>,
         hang_from_now_on: bool,
+        /// The next `status_lost` says the status was lost.
+        lost: bool,
+        /// How many times `status_lost` was asked.
+        lost_checks: usize,
     }
 
     /// Reads what a [`FakeTarget`] received, with times in ms since `t0`.
@@ -1021,6 +1049,15 @@ mod tests {
 
         fn hang_from_now_on(&self) {
             self.log.lock().unwrap().hang_from_now_on = true;
+        }
+
+        /// The status is gone, like Discord after a restart.
+        fn lose_status(&self) {
+            self.log.lock().unwrap().lost = true;
+        }
+
+        fn lost_checks(&self) -> usize {
+            self.log.lock().unwrap().lost_checks
         }
     }
 
@@ -1104,6 +1141,12 @@ mod tests {
 
         async fn clear(&mut self) -> Result<(), TargetError> {
             self.record(Call::Clear).await
+        }
+
+        async fn status_lost(&mut self) -> bool {
+            let mut log = self.handle.log.lock().unwrap();
+            log.lost_checks += 1;
+            std::mem::take(&mut log.lost)
         }
     }
 
@@ -1313,6 +1356,56 @@ mod tests {
             ],
             2,
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_status_is_shown_again() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.play(song("Song"), 0);
+        let lyrics = FakeLyrics::default().with("Song", 0, synced(&[(1_000, "Only")]));
+        let (discord, log) = FakeTarget::new("discord", 2_000, t0);
+        let run = start(engine(config(), &source, lyrics, vec![discord]), t0);
+
+        // Shown at 2 s (the startup clear used the 2 s budget), then unchanged.
+        run.until(5_000).await;
+        // Discord restarts: the line is gone although nothing changed.
+        log.lose_status();
+        run.until(8_000).await;
+        // Asked on every poll; a status that is still there is not sent again.
+        assert!(log.lost_checks() >= 14, "{}", log.lost_checks());
+        run.stop().await;
+
+        assert_calls(
+            &log.calls(),
+            &[
+                (0, Call::Clear),
+                (2_000, line("Only")),
+                // Noticed on the next poll (every 500 ms) and sent right away.
+                (5_000, line("Only")),
+                (8_000, Call::Clear),
+            ],
+            500,
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_clear_is_not_resent() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        let (discord, log) = FakeTarget::new("discord", 0, t0);
+        let run = start(
+            engine(config(), &source, FakeLyrics::default(), vec![discord]),
+            t0,
+        );
+
+        run.until(1_000).await;
+        // Nothing was showing, so there is nothing to show again.
+        log.lose_status();
+        run.until(3_000).await;
+        run.stop().await;
+
+        assert_eq!(log.calls(), [(0, Call::Clear)]);
     }
 
     #[tokio::test(start_paused = true)]
