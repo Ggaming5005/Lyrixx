@@ -20,7 +20,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Linux builds on the oldest Ubuntu runner: the binaries, and the
+        # libraries the AppImage carries, then need only its glibc (2.35),
+        # so they also run on Ubuntu 22.04, Debian 12 and Mint 21.
+        os: [ubuntu-22.04, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 

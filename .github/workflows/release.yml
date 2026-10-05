@@ -23,7 +23,10 @@ jobs:
           - platform: macos-latest
             # One app for Apple silicon and Intel Macs.
             args: "--target universal-apple-darwin"
-          - platform: ubuntu-latest
+          # The oldest Ubuntu runner: the binaries, and the libraries the
+          # AppImage carries, then need only its glibc (2.35), so they also
+          # run on Ubuntu 22.04, Debian 12 and Mint 21.
+          - platform: ubuntu-22.04
             args: ""
     steps:
       - uses: actions/checkout@v4
