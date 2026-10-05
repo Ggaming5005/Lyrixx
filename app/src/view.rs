@@ -46,7 +46,9 @@ pub struct NowView {
     pub position_at_unix_ms: u64,
     pub rate: f64,
     /// Cover art as a URL the window can load: `https:`, `http:` or `data:`.
-    /// `None` when the player has none (or it is still being read).
+    /// `None` when the player has none (or it is still being read). It can
+    /// change during the first seconds of a song, when the player hands over
+    /// the new cover after the new title.
     pub artwork: Option<String>,
     /// [`crate::matcher::song_key`] of the normalized track; per-song offsets
     /// are stored under this key.

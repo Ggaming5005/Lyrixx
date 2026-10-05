@@ -34,8 +34,11 @@ const REPEAT_LOG_EVERY: Duration = Duration::from_secs(60);
 /// Polls are never more frequent than this, whatever the settings say
 /// ([`Config::validate`] reports lower values as an error).
 const MIN_POLL_INTERVAL_MS: u64 = 100;
-/// Longest wait for one cover art read; longer means no cover for the song.
+/// Longest wait for one cover art read; longer counts as a failed read.
 const ARTWORK_TIMEOUT: Duration = Duration::from_secs(5);
+/// After a track change the cover art is read again after every poll for
+/// this long: players often hand over the new title before its cover.
+const ARTWORK_REREAD_FOR: Duration = Duration::from_secs(3);
 /// The view's position anchor moves when the clock is further than this from
 /// where the published anchor puts the song.
 const VIEW_DRIFT_MS: u64 = 250;
@@ -69,9 +72,10 @@ const VIEW_DRIFT_MS: u64 = 250;
 /// - With a view ([`Engine::with_view`]), an [`EngineView`] is published right
 ///   after each turn of the loop updated the state and the targets, only when
 ///   it differs from the one published last. Every track change also reads
-///   the song's cover art from the source, once, for the view. Without a view
-///   neither happens. Targets are optional: with none, the engine only
-///   follows the song for the view.
+///   the song's cover art from the source for the view, and it is read again
+///   after the polls of the next 3 s. Without a view neither happens.
+///   Targets are optional: with none, the engine only follows the song for
+///   the view.
 ///
 /// Details:
 /// - Targets are updated one after the other. Each `set` or `clear` may take
@@ -111,11 +115,17 @@ const VIEW_DRIFT_MS: u64 = 250;
 ///   answer, `showing` / `cleared` after a successful `set` / `clear`,
 ///   `waiting` on `Unavailable`, `rateLimited` on a backoff, `retrying` on
 ///   another error or a timeout, `off` once switched off.
-/// - The cover art is read alongside rendering, like the source, and may take
-///   at most 5 s. A track change abandons a read for the song before; a result
-///   for a song that is no longer playing is ignored. An error (logged at
-///   debug level) means no cover, as does a URL that is not `https:`,
-///   `http:` or `data:`.
+/// - The cover art is read alongside rendering, like the source, one read
+///   at a time, and each read may take at most 5 s. Players often hand over
+///   the new title first and the new cover a moment later (until then they
+///   give the cover of the song before, or none), so the poll that sees a
+///   track change starts a read, and every poll in the 3 s after it (at
+///   least the next one) starts another once the read before has finished.
+///   The view takes each answer, so a late or corrected cover is published.
+///   A track change abandons a read for the song before; a result for a song
+///   that is no longer playing is ignored. An error (logged at debug level)
+///   keeps the cover read before; a URL that is not `https:`, `http:` or
+///   `data:` means no cover.
 pub struct Engine {
     config: Config,
     source: Box<dyn NowPlayingSource>,
@@ -265,8 +275,10 @@ impl Engine {
                     reading = None;
                     let new_song = state.on_source(result, &chain, &lookup_tx);
                     state.refresh_offsets();
-                    if new_song && view.is_some() {
-                        // Replaces a read for the song before.
+                    if view.is_some()
+                        && state.artwork_read_due(new_song, artwork.is_some(), Instant::now())
+                    {
+                        // A new song's read replaces a read for the song before.
                         artwork = Some(start_artwork(&*source, state.generation));
                     }
                 }
@@ -397,8 +409,15 @@ struct Playing {
     /// [`crate::matcher::song_key`] of the normalized track.
     key: String,
     song_offset_ms: i64,
-    /// Cover art URL, once read (only with a view).
+    /// When the track change was seen.
+    changed_at: Instant,
+    /// Cover art URL, as the latest read that answered gave it (only with a
+    /// view).
     artwork: Option<String>,
+    /// Bumped whenever `artwork` changes, so the view sends it again.
+    artwork_rev: u32,
+    /// Cover art reads started for this song.
+    artwork_reads: u32,
 }
 
 /// Everything the loop knows, apart from the targets.
@@ -583,7 +602,10 @@ impl State<'_> {
             searching: true,
             key,
             song_offset_ms,
+            changed_at: Instant::now(),
             artwork: None,
+            artwork_rev: 0,
+            artwork_reads: 0,
         });
     }
 
@@ -613,6 +635,27 @@ impl State<'_> {
         }
     }
 
+    /// Whether to start reading the cover art of the song playing now. Asked
+    /// right after each source read (only with a view): `new_song` when that
+    /// read saw a track change, `in_flight` when a cover read is under way.
+    /// A new song is read at once (replacing a read for the song before).
+    /// After that, each poll reads it again once the read before has
+    /// finished, for [`ARTWORK_REREAD_FOR`] after the track change and at
+    /// least once, so a slow poll still gets a second look. Counts the read
+    /// when it is due.
+    fn artwork_read_due(&mut self, new_song: bool, in_flight: bool, now: Instant) -> bool {
+        let Some(playing) = self.playing.as_mut() else {
+            return false;
+        };
+        let due = new_song
+            || (!in_flight
+                && (playing.artwork_reads < 2 || now < playing.changed_at + ARTWORK_REREAD_FOR));
+        if due {
+            playing.artwork_reads = playing.artwork_reads.saturating_add(1);
+        }
+        due
+    }
+
     /// The cover art read for the song of `generation` finished.
     fn on_artwork(&mut self, generation: u64, result: anyhow::Result<Option<String>>) {
         if generation != self.generation {
@@ -622,14 +665,23 @@ impl State<'_> {
         let Some(playing) = self.playing.as_mut() else {
             return;
         };
-        match result {
-            Ok(Some(url)) if is_window_url(&url) => playing.artwork = Some(url),
+        let artwork = match result {
+            Ok(Some(url)) if is_window_url(&url) => Some(url),
             Ok(Some(url)) => {
                 let start: String = url.chars().take(40).collect();
                 tracing::debug!("ignoring cover art that a window cannot load: {start}");
+                None
             }
-            Ok(None) => {}
-            Err(e) => tracing::debug!("no cover art: {e:#}"),
+            Ok(None) => None,
+            Err(e) => {
+                // Keep what an earlier read gave; the next one may work.
+                tracing::debug!("no cover art: {e:#}");
+                return;
+            }
+        };
+        if playing.artwork != artwork {
+            playing.artwork = artwork;
+            playing.artwork_rev = playing.artwork_rev.wrapping_add(1);
         }
     }
 
@@ -858,14 +910,16 @@ struct ViewPublisher {
 }
 
 /// The lyrics and the cover art of the song in the view only change with the
-/// song (its generation), when its lookup comes back and when its cover
-/// arrives. While this key stays the same they are neither rebuilt nor
-/// compared, so a long song with a large cover costs nothing per turn.
+/// song (its generation), when its lookup comes back and when a cover read
+/// gives a different cover. While this key stays the same they are neither
+/// rebuilt nor compared, so a long song with a large cover costs nothing per
+/// turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HeavyKey {
     generation: u64,
     searching: bool,
-    has_artwork: bool,
+    /// [`Playing::artwork_rev`].
+    artwork_rev: u32,
 }
 
 impl ViewPublisher {
@@ -895,7 +949,7 @@ impl ViewPublisher {
         let heavy = song.map(|(playing, _)| HeavyKey {
             generation: state.generation,
             searching: playing.searching,
-            has_artwork: playing.artwork.is_some(),
+            artwork_rev: playing.artwork_rev,
         });
         let same_heavy = heavy.is_some() && heavy == self.heavy;
         self.heavy = heavy;
@@ -1197,8 +1251,8 @@ mod tests {
         in_flight: usize,
         /// The most reads in flight at the same time.
         max_in_flight: usize,
-        /// The player has covers: [`cover_of`] the song playing when asked.
-        covers: bool,
+        /// What cover art reads give.
+        covers: Covers,
         /// Cover art reads fail with this message.
         cover_error: Option<String>,
         /// How long each cover art read takes; `None` = never finishes.
@@ -1211,6 +1265,19 @@ mod tests {
     /// The cover URL the fake player gives for `title`.
     fn cover_of(title: &str) -> String {
         format!("https://covers.example/{}.jpg", title.replace(' ', "-"))
+    }
+
+    /// What the fake player gives as cover art.
+    #[derive(Default)]
+    enum Covers {
+        /// No cover.
+        #[default]
+        Missing,
+        /// [`cover_of`] the song playing when asked.
+        OfTheSong,
+        /// This URL, whatever plays: a player that did not catch up with the
+        /// song yet.
+        Stuck(String),
     }
 
     /// Controls a [`FakeSource`] from the test.
@@ -1307,7 +1374,17 @@ mod tests {
 
         /// The player has cover art from now on (see [`cover_of`]).
         fn with_covers(&self) {
-            self.0.lock().unwrap().covers = true;
+            self.0.lock().unwrap().covers = Covers::OfTheSong;
+        }
+
+        /// The player has no cover art from now on.
+        fn without_covers(&self) {
+            self.0.lock().unwrap().covers = Covers::Missing;
+        }
+
+        /// The player gives `url` as the cover from now on, whatever plays.
+        fn stuck_cover(&self, url: String) {
+            self.0.lock().unwrap().covers = Covers::Stuck(url);
         }
 
         /// Cover art reads from now on take `ms`.
@@ -1322,6 +1399,11 @@ mod tests {
 
         fn fail_covers(&self, message: &str) {
             self.0.lock().unwrap().cover_error = Some(message.into());
+        }
+
+        /// Cover art reads work again from now on.
+        fn fix_covers(&self) {
+            self.0.lock().unwrap().cover_error = None;
         }
 
         fn cover_reads(&self) -> usize {
@@ -1377,13 +1459,13 @@ mod tests {
                 let mut state = self.0 .0.lock().unwrap();
                 state.cover_reads += 1;
                 state.covers_in_flight += 1;
-                let result = match &state.cover_error {
-                    Some(message) => Err(anyhow::anyhow!(message.clone())),
-                    None => Ok(state
-                        .playback
-                        .as_ref()
-                        .filter(|_| state.covers)
-                        .map(|p| cover_of(&p.track.title))),
+                let result = match (&state.cover_error, &state.covers) {
+                    (Some(message), _) => Err(anyhow::anyhow!(message.clone())),
+                    (None, Covers::Missing) => Ok(None),
+                    (None, Covers::OfTheSong) => {
+                        Ok(state.playback.as_ref().map(|p| cover_of(&p.track.title)))
+                    }
+                    (None, Covers::Stuck(url)) => Ok(state.playback.as_ref().map(|_| url.clone())),
                 };
                 (result, state.cover_latency)
             };
@@ -3429,8 +3511,23 @@ mod tests {
     // Cover art
     // ---------------------------------------------------------------------
 
+    /// The covers the view showed for the song `title`, in order, without
+    /// repeats, from the first one on (before its first read answers, a
+    /// song has none in the view).
+    fn covers_shown(view: &ViewLog, title: &str) -> Vec<Option<String>> {
+        let mut covers: Vec<Option<String>> = view
+            .seen()
+            .into_iter()
+            .filter_map(|(_, v)| v.now.filter(|now| now.title == title))
+            .map(|now| now.artwork)
+            .skip_while(Option::is_none)
+            .collect();
+        covers.dedup();
+        covers
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn the_cover_is_read_once_per_song() {
+    async fn the_cover_is_read_again_for_3_s_after_each_track_change() {
         let t0 = Instant::now();
         let source = SourceHandle::default();
         source.with_covers();
@@ -3452,15 +3549,166 @@ mod tests {
         run.until(4_050).await;
         let reads_for_a = source.cover_reads();
         source.play(song("Song B"), 0);
-        run.until(5_000).await;
+        run.until(9_050).await;
         let second = view.now();
         run.stop().await;
 
         assert_eq!(first.artwork, Some(cover_of("Song A")));
-        assert_eq!(reads_for_a, 1);
+        // On the track change at 0 s, then after the polls at 0.5 s to 2.5 s.
+        assert_eq!(reads_for_a, 6);
         assert_eq!(second.title, "Song B");
         assert_eq!(second.artwork, Some(cover_of("Song B")));
+        // B was seen at 4.5 s: read then and after the polls up to 7 s.
+        assert_eq!(source.cover_reads(), 12);
+        // Reading the same cover again never takes it away.
+        for title in ["Song A", "Song B"] {
+            assert_eq!(covers_shown(&view, title), [Some(cover_of(title))]);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cover_that_comes_after_the_title_is_picked_up() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.with_covers();
+        source.play(song("Song A"), 0);
+        let (engine, view) = watched(
+            engine(config(), &source, FakeLyrics::default(), Vec::new()),
+            t0,
+        );
+        let run = start(engine, t0);
+
+        // Like Chromium: B's title comes with A's cover still in place (seen
+        // at 4.5 s), and B's cover a little later.
+        run.until(4_050).await;
+        source.stuck_cover(cover_of("Song A"));
+        source.play(song("Song B"), 0);
+        run.until(4_600).await;
+        let stale = view.now();
+        run.until(5_250).await;
+        source.with_covers();
+        run.until(5_600).await;
+        let corrected = view.now();
+        // Like Firefox: C's title comes with no cover (seen at 8.5 s), and
+        // C's cover 2.25 s later.
+        run.until(8_050).await;
+        source.without_covers();
+        source.play(song("Song C"), 0);
+        run.until(8_600).await;
+        let missing = view.now();
+        run.until(10_750).await;
+        source.with_covers();
+        run.until(11_100).await;
+        let arrived = view.now();
+        run.stop().await;
+
+        assert_eq!(stale.title, "Song B");
+        assert_eq!(stale.artwork, Some(cover_of("Song A")));
+        assert_eq!(corrected.artwork, Some(cover_of("Song B")));
+        assert_eq!(missing.title, "Song C");
+        assert_eq!(missing.artwork, None);
+        assert_eq!(arrived.artwork, Some(cover_of("Song C")));
+        // Published as soon as a read gave them.
+        let published_at = |title: &str, cover: &str| {
+            view.seen()
+                .into_iter()
+                .find(|(_, v)| {
+                    v.now.as_ref().is_some_and(|now| {
+                        now.title == title && now.artwork.as_deref() == Some(cover)
+                    })
+                })
+                .map(|(at, _)| at)
+        };
+        assert_eq!(published_at("Song B", &cover_of("Song B")), Some(5_500));
+        assert_eq!(published_at("Song C", &cover_of("Song C")), Some(11_000));
+        assert_eq!(
+            covers_shown(&view, "Song B"),
+            [Some(cover_of("Song A")), Some(cover_of("Song B"))]
+        );
+        assert_eq!(covers_shown(&view, "Song C"), [Some(cover_of("Song C"))]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cover_that_comes_3_s_after_the_title_is_not_read_anymore() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.play(song("Song"), 0);
+        let (engine, view) = watched(
+            engine(config(), &source, FakeLyrics::default(), Vec::new()),
+            t0,
+        );
+        let run = start(engine, t0);
+
+        run.until(3_250).await;
+        source.with_covers();
+        run.until(10_000).await;
+        run.stop().await;
+
+        assert_eq!(source.cover_reads(), 6);
+        assert_eq!(view.now().artwork, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn with_a_slow_poll_the_cover_is_still_read_again_on_the_next_one() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.play(song("Song"), 0);
+        let mut config = config();
+        config.general.poll_interval_ms = 5_000;
+        let (engine, view) = watched(
+            engine(config, &source, FakeLyrics::default(), Vec::new()),
+            t0,
+        );
+        let run = start(engine, t0);
+
+        run.until(1_000).await;
+        let missing = view.now();
+        source.with_covers();
+        run.until(5_100).await;
+        let arrived = view.now();
+        run.until(12_000).await;
+        run.stop().await;
+
+        assert_eq!(missing.artwork, None);
+        assert_eq!(arrived.artwork, Some(cover_of("Song")));
+        // At 0 s and 5 s; not at 10 s.
         assert_eq!(source.cover_reads(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_cover_read_keeps_the_cover_and_the_next_poll_tries_again() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.with_covers();
+        source.fail_covers("the previous cover art read is still running");
+        source.play(song("Song"), 0);
+        let (engine, view) = watched(
+            engine(config(), &source, FakeLyrics::default(), Vec::new()),
+            t0,
+        );
+        let run = start(engine, t0);
+
+        run.until(750).await;
+        let failed = view.now();
+        source.fix_covers();
+        run.until(1_100).await;
+        let read = view.now();
+        // The reads at 1.5 s and 2 s fail: the cover stays.
+        source.fail_covers("the cover art did not arrive within 5 s");
+        run.until(2_250).await;
+        let kept = view.now();
+        // The player says it has no cover anymore (read at 2.5 s).
+        source.fix_covers();
+        source.without_covers();
+        run.until(2_600).await;
+        let gone = view.now();
+        run.stop().await;
+
+        assert_eq!(failed.artwork, None);
+        assert_eq!(read.artwork, Some(cover_of("Song")));
+        assert_eq!(kept.artwork, Some(cover_of("Song")));
+        assert_eq!(gone.artwork, None);
+        assert_eq!(source.cover_reads(), 6);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3523,14 +3771,16 @@ mod tests {
         source.play(song("Song B"), 0);
         run.until(3_000).await;
         let waiting = view.now();
-        run.until(4_000).await;
+        run.until(4_200).await;
         let arrived = view.now();
         run.stop().await;
 
         assert_eq!(waiting.title, "Song B");
         assert_eq!(waiting.artwork, None);
         assert_eq!(arrived.artwork, Some(cover_of("Song B")));
-        assert_eq!(source.cover_reads(), 2);
+        // A's, B's (asked at 1.5 s, here at 3.5 s), and B's again (asked at
+        // 3.5 s, still under way).
+        assert_eq!(source.cover_reads(), 3);
         let a_cover = Some(cover_of("Song A"));
         assert!(
             view.seen()
@@ -3554,9 +3804,9 @@ mod tests {
         let run = start(engine, t0);
 
         run.until(4_900).await;
-        let in_flight_before = source.covers_in_flight();
+        let before = (source.cover_reads(), source.covers_in_flight());
         run.until(5_100).await;
-        let in_flight_after = source.covers_in_flight();
+        let after = (source.cover_reads(), source.covers_in_flight());
         // The next song's cover works again; the one after fails.
         source.slow_covers(0);
         source.play(song("Song B"), 0);
@@ -3568,13 +3818,16 @@ mod tests {
         let c = view.now();
         run.stop().await;
 
-        assert_eq!(in_flight_before, 1);
-        assert_eq!(in_flight_after, 0, "abandoned at 5 s");
+        // One read, under way: the polls meanwhile did not stack more.
+        assert_eq!(before, (1, 1));
+        // Abandoned at 5 s; the poll then asked again (that read hangs too).
+        assert_eq!(after, (2, 1));
         assert_eq!(log.last_call_until(4_500), Some(line("Late")));
         assert_eq!(b.artwork, Some(cover_of("Song B")));
         assert_eq!(c.title, "Song C");
         assert_eq!(c.artwork, None);
-        assert_eq!(source.cover_reads(), 3);
+        // C was asked at 6 s and 6.5 s.
+        assert_eq!(source.cover_reads(), 5);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3589,7 +3842,7 @@ mod tests {
             t0,
         );
 
-        run.until(2_000).await;
+        run.until(4_000).await;
         run.stop().await;
 
         assert_eq!(source.cover_reads(), 0);

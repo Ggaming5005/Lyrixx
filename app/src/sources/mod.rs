@@ -38,7 +38,9 @@ pub trait NowPlayingSource: Send + Sync {
     /// Cover art of the song the last [`snapshot`](Self::snapshot) reported,
     /// as a URL a window can load (`https:`, `http:` or `data:`; local files
     /// are read and returned as `data:` URLs). `Ok(None)` when the player
-    /// has none. Called once per track change, off the render path.
+    /// has none. Called on every track change and again after the polls of
+    /// the next few seconds (players often hand over the new cover after
+    /// the new title), one call at a time, off the render path.
     async fn artwork(&self) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
