@@ -35,8 +35,28 @@ pub fn render(template: &str, ctx: &TemplateContext<'_>) -> String {
 /// when it had to cut. Never splits a character. Prefers cutting at the last
 /// space within the final 30% of the allowed length. `max_chars == 0` returns "".
 pub fn truncate_chars(s: &str, max_chars: usize) -> String {
-    let _ = (s, max_chars);
-    todo!()
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    // Leave room for the ellipsis.
+    let keep = max_chars - 1;
+    let head: String = s.chars().take(keep).collect();
+    // Prefer a word boundary within the last 30% of the allowed length.
+    let min_cut = keep - keep * 3 / 10;
+    let cut = head
+        .char_indices()
+        .filter(|&(i, c)| c == ' ' && i > 0 && head[..i].chars().count() >= min_cut)
+        .map(|(i, _)| i)
+        .last();
+    let mut out = match cut {
+        Some(i) => head[..i].trim_end().to_string(),
+        None => head.trim_end().to_string(),
+    };
+    out.push('…');
+    out
 }
 
 /// Masks each listed word (case-insensitive, whole words only) by keeping its
@@ -51,4 +71,34 @@ pub fn filter_profanity(s: &str, words: &[String]) -> String {
 /// has not listed their own words. Short, common English words only.
 pub fn default_profanity_words() -> Vec<String> {
     todo!()
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_chars;
+
+    #[test]
+    fn short_strings_are_untouched() {
+        assert_eq!(truncate_chars("hello", 5), "hello");
+        assert_eq!(truncate_chars("", 0), "");
+    }
+
+    #[test]
+    fn cuts_at_a_word_boundary_near_the_end() {
+        assert_eq!(truncate_chars("never gonna give you up", 15), "never gonna…");
+    }
+
+    #[test]
+    fn cuts_mid_word_when_no_space_is_close() {
+        assert_eq!(truncate_chars("abcdefghij", 5), "abcd…");
+        assert_eq!(truncate_chars("abc", 0), "");
+        assert_eq!(truncate_chars("abc", 1), "…");
+    }
+
+    #[test]
+    fn never_splits_multibyte_characters() {
+        let s = "🎵🎵🎵🎵🎵";
+        assert_eq!(truncate_chars(s, 3), "🎵🎵…");
+        assert_eq!(truncate_chars("ქართული ენა", 8), "ქართული…");
+    }
 }
