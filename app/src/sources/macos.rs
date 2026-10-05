@@ -35,10 +35,19 @@
 //!   app failed (for example because Lyrix was denied the Automation permission),
 //!   the failure is logged as a warning at most once a minute. The snapshot is
 //!   still "nothing playing", so a status from an app that has quit is cleared.
+//!
+//! Cover art, for the app the last snapshot picked:
+//! - From mediaremote-adapter: its `artworkData` (base64) and
+//!   `artworkMimeType`, handed over as a `data:` URL (at most 2 MiB).
+//! - Spotify (through AppleScript, or the adapter without artwork data):
+//!   `artwork url of current track`, an `https:` URL, asked only while
+//!   Spotify is running.
+//! - Apple Music through AppleScript: none.
 
+use super::artwork::data_url_from_base64;
 use super::{
-    choose, instant_at, is_blocked, sanitize_rate, spotify_track_id, system_time_from_unix_ms,
-    NowPlayingSource,
+    choose, instant_at, is_blocked, sanitize_rate, spotify_track_id,
+    strip_prefix_ignore_ascii_case, system_time_from_unix_ms, NowPlayingSource,
 };
 use crate::types::{PlaybackSnapshot, PlaybackStatus, Track};
 use anyhow::{anyhow, bail, Context};
@@ -69,6 +78,28 @@ pub struct MacSource {
     blocked: Vec<String>,
     /// Limits the "could not read the player" warning.
     failure_warnings: LogLimiter,
+    /// Where the cover of the song the last snapshot picked comes from.
+    art: Mutex<ArtSource>,
+}
+
+/// Where the cover of the song being played can be found.
+#[derive(Debug, Clone, PartialEq)]
+enum ArtSource {
+    /// Nowhere: nothing plays, or the app has no cover to give.
+    None,
+    /// The AppleScript app with this name, which has `artwork url`.
+    Scripted(&'static str),
+    /// What mediaremote-adapter reported.
+    Adapter(AdapterArtwork),
+}
+
+/// The cover art in mediaremote-adapter's output.
+#[derive(Debug, Clone, PartialEq)]
+struct AdapterArtwork {
+    /// `artworkData`: the image, base64-encoded.
+    data: String,
+    /// `artworkMimeType`, e.g. `image/jpeg`.
+    mime: Option<String>,
 }
 
 impl MacSource {
@@ -78,6 +109,7 @@ impl MacSource {
             preferred,
             blocked,
             failure_warnings: LogLimiter::new(FAILURE_WARNING_INTERVAL),
+            art: Mutex::new(ArtSource::None),
         }
     }
 }
@@ -91,6 +123,10 @@ impl NowPlayingSource for MacSource {
     async fn snapshot(&self) -> anyhow::Result<Option<PlaybackSnapshot>> {
         self.read_with(PERL, OSASCRIPT).await
     }
+
+    async fn artwork(&self) -> anyhow::Result<Option<String>> {
+        self.artwork_with(OSASCRIPT).await
+    }
 }
 
 impl MacSource {
@@ -103,8 +139,17 @@ impl MacSource {
         if let Some(dir) = &self.adapter_dir {
             match read_adapter(perl, dir, &self.blocked).await {
                 Ok(found) => {
-                    let candidates = found.into_iter().collect();
-                    return Ok(choose(candidates, &self.preferred, &self.blocked));
+                    let (candidates, artwork) = match found {
+                        Some(entry) => (vec![entry.snapshot], entry.artwork),
+                        None => (Vec::new(), None),
+                    };
+                    let picked = choose(candidates, &self.preferred, &self.blocked);
+                    self.remember_art(match (&picked, artwork) {
+                        (None, _) => ArtSource::None,
+                        (Some(_), Some(artwork)) => ArtSource::Adapter(artwork),
+                        (Some(picked), None) => scripted_art(&picked.app_id),
+                    });
+                    return Ok(picked);
                 }
                 Err(err) => {
                     tracing::debug!("mediaremote-adapter failed, using AppleScript: {err:#}");
@@ -120,8 +165,47 @@ impl MacSource {
                 );
             }
         }
-        Ok(choose(read.snapshots, &self.preferred, &self.blocked))
+        let picked = choose(read.snapshots, &self.preferred, &self.blocked);
+        self.remember_art(
+            picked
+                .as_ref()
+                .map_or(ArtSource::None, |picked| scripted_art(&picked.app_id)),
+        );
+        Ok(picked)
     }
+
+    fn remember_art(&self, art: ArtSource) {
+        *self.art.lock().unwrap_or_else(PoisonError::into_inner) = art;
+    }
+
+    /// [`NowPlayingSource::artwork`] with the program to run (tests use a fake).
+    async fn artwork_with(&self, osascript: &str) -> anyhow::Result<Option<String>> {
+        let art = self
+            .art
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        match art {
+            ArtSource::None => Ok(None),
+            ArtSource::Scripted(app) => {
+                let output = run_osascript(osascript, &artwork_script(app))
+                    .await
+                    .with_context(|| format!("could not ask {app} for the cover art"))?;
+                Ok(parse_artwork_url(&output))
+            }
+            ArtSource::Adapter(artwork) => {
+                Ok(data_url_from_base64(&artwork.data, artwork.mime.as_deref()))
+            }
+        }
+    }
+}
+
+/// The cover of a scripted app's song: Spotify has `artwork url`, Apple
+/// Music has no URL to give.
+fn scripted_art(app_id: &str) -> ArtSource {
+    APPS.iter()
+        .find(|app| app.artwork_url && app.app_id == app_id)
+        .map_or(ArtSource::None, |app| ArtSource::Scripted(app.name))
 }
 
 /// Lets a message through at most once per interval.
@@ -172,6 +256,8 @@ struct ScriptedApp {
     duration_unit: DurationUnit,
     /// The track `id` is a Spotify URI.
     spotify_ids: bool,
+    /// The track has an `artwork url` (its cover as a web URL).
+    artwork_url: bool,
 }
 
 const APPS: [ScriptedApp; 2] = [
@@ -180,12 +266,14 @@ const APPS: [ScriptedApp; 2] = [
         app_id: "com.spotify.client",
         duration_unit: DurationUnit::Millis,
         spotify_ids: true,
+        artwork_url: true,
     },
     ScriptedApp {
         name: "Music",
         app_id: "com.apple.Music",
         duration_unit: DurationUnit::Seconds,
         spotify_ids: false,
+        artwork_url: false,
     },
 ];
 
@@ -304,6 +392,29 @@ fn query_script(app: &ScriptedApp) -> Vec<String> {
         "return \"\"".to_string(),
     ]);
     lines
+}
+
+/// One line per `-e`: prints the `artwork url` of the app's current track, or
+/// nothing when the app is not running (it is never launched).
+fn artwork_script(app: &str) -> Vec<String> {
+    vec![
+        format!("if application \"{app}\" is running then"),
+        format!("tell application \"{app}\""),
+        "return ((artwork url of current track) as text)".to_string(),
+        "end tell".to_string(),
+        "end if".to_string(),
+        "return \"\"".to_string(),
+    ]
+}
+
+/// The URL printed by [`artwork_script`]: an `https:` or `http:` URL, else
+/// `None` (`missing value`, an empty line, anything else).
+fn parse_artwork_url(output: &str) -> Option<String> {
+    let url = output.trim();
+    let web = ["https://", "http://"].into_iter().any(|scheme| {
+        strip_prefix_ignore_ascii_case(url, scheme).is_some_and(|rest| !rest.is_empty())
+    });
+    (web && !url.contains(char::is_whitespace)).then(|| url.to_string())
 }
 
 /// `true␟false` → `[true, false]`, padded with `false` to `count` entries.
@@ -453,11 +564,18 @@ fn ms_from(value: f64) -> Option<u64> {
 // mediaremote-adapter
 // ---------------------------------------------------------------------------
 
+/// What mediaremote-adapter reported.
+#[derive(Debug, Clone, PartialEq)]
+struct AdapterEntry {
+    snapshot: PlaybackSnapshot,
+    artwork: Option<AdapterArtwork>,
+}
+
 async fn read_adapter(
     perl: &str,
     dir: &Path,
     blocked: &[String],
-) -> anyhow::Result<Option<PlaybackSnapshot>> {
+) -> anyhow::Result<Option<AdapterEntry>> {
     let script = dir.join("bin").join("mediaremote-adapter.pl");
     let framework = dir.join("build").join("MediaRemoteAdapter.framework");
     let args = [script.as_os_str(), framework.as_os_str(), OsStr::new("get")];
@@ -475,12 +593,15 @@ async fn read_adapter(
 /// `com.apple.WebKit.GPU` with `parentApplicationBundleIdentifier`
 /// `com.apple.Safari`. The parent (when present) is the `app_id`, and an entry
 /// whose bundle id or parent id is `blocked` gives `None`.
+///
+/// `artworkData` (base64) and `artworkMimeType` are kept as they are for
+/// [`NowPlayingSource::artwork`]; blank data counts as no artwork.
 fn parse_adapter_output(
     output: &str,
     blocked: &[String],
     now_sys: SystemTime,
     now: Instant,
-) -> anyhow::Result<Option<PlaybackSnapshot>> {
+) -> anyhow::Result<Option<AdapterEntry>> {
     let output = output.trim();
     if output.is_empty() || output == "null" {
         return Ok(None);
@@ -537,7 +658,7 @@ fn parse_adapter_output(
         (0, now)
     };
 
-    Ok(Some(PlaybackSnapshot {
+    let snapshot = PlaybackSnapshot {
         track: Track {
             title,
             artist,
@@ -554,7 +675,13 @@ fn parse_adapter_output(
         position_at,
         rate,
         app_id,
-    }))
+    };
+    let data = json_text(info, "artworkData");
+    let artwork = (!data.trim().is_empty()).then(|| AdapterArtwork {
+        data,
+        mime: Some(json_text(info, "artworkMimeType")).filter(|mime| !mime.trim().is_empty()),
+    });
+    Ok(Some(AdapterEntry { snapshot, artwork }))
 }
 
 /// A string field; anything else is empty.
@@ -1128,7 +1255,52 @@ mod tests {
                 query.iter().any(|line| line.contains("id of t")),
                 app.spotify_ids
             );
+
+            let artwork = artwork_script(app.name);
+            assert_eq!(
+                artwork[0],
+                format!("if application \"{}\" is running then", app.name)
+            );
+            assert_eq!(artwork[1], format!("tell application \"{}\"", app.name));
+            assert!(artwork
+                .iter()
+                .all(|line| !line.is_empty() && !line.contains('\n')));
         }
+    }
+
+    // ---- cover art -------------------------------------------------------------------
+
+    #[test]
+    fn artwork_urls_from_applescript() {
+        let url = "https://i.scdn.co/image/ab67616d0000b273d9194aa18fa4c9362b47464f";
+        assert_eq!(parse_artwork_url(&format!("{url}\n")).as_deref(), Some(url));
+        assert_eq!(
+            parse_artwork_url(" http://i.scdn.co/image/abc\r\n").as_deref(),
+            Some("http://i.scdn.co/image/abc")
+        );
+        for output in [
+            "",
+            "\n",
+            "missing value",
+            "https://",
+            "https://a b",
+            "file:///tmp/cover.jpg",
+            "spotify:image:abc",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(parse_artwork_url(output), None, "{output:?}");
+        }
+    }
+
+    #[test]
+    fn only_spotify_has_a_scripted_cover() {
+        assert_eq!(
+            scripted_art("com.spotify.client"),
+            ArtSource::Scripted("Spotify")
+        );
+        assert_eq!(scripted_art("com.apple.Music"), ArtSource::None);
+        assert_eq!(scripted_art("com.google.Chrome"), ArtSource::None);
+        assert_eq!(scripted_art(""), ArtSource::None);
     }
 
     // ---- mediaremote-adapter -------------------------------------------------------
@@ -1145,14 +1317,17 @@ mod tests {
 
     fn adapter(json: &str) -> Option<PlaybackSnapshot> {
         let (now_sys, now) = fixed_now();
-        parse_adapter_output(json, &[], now_sys, now).unwrap()
+        parse_adapter_output(json, &[], now_sys, now)
+            .unwrap()
+            .map(|entry| entry.snapshot)
     }
 
     fn age_of(json: &str) -> Duration {
         let (now_sys, now) = fixed_now();
         let snapshot = parse_adapter_output(json, &[], now_sys, now)
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .snapshot;
         now.duration_since(snapshot.position_at)
     }
 
@@ -1172,9 +1347,17 @@ mod tests {
             "artworkMimeType": "image/jpeg",
             "artworkData": "/9j/4AAQ"
         }"#;
-        let snapshot = parse_adapter_output(json, &[], now_sys, now)
+        let entry = parse_adapter_output(json, &[], now_sys, now)
             .unwrap()
             .unwrap();
+        assert_eq!(
+            entry.artwork,
+            Some(AdapterArtwork {
+                data: "/9j/4AAQ".into(),
+                mime: Some("image/jpeg".into()),
+            })
+        );
+        let snapshot = entry.snapshot;
         assert_eq!(
             snapshot.track,
             Track {
@@ -1318,7 +1501,7 @@ mod tests {
         let kept = parse_adapter_output(helper, &blocked(&["chrome", "", "  "]), now_sys, now)
             .unwrap()
             .unwrap();
-        assert_eq!(kept.app_id, "com.apple.Safari");
+        assert_eq!(kept.snapshot.app_id, "com.apple.Safari");
 
         let plain = r#"{"title":"Song","bundleIdentifier":"com.spotify.client"}"#;
         assert_eq!(
@@ -1327,6 +1510,40 @@ mod tests {
         );
         // Blocking never turns bad output into "nothing": it is still an error.
         assert!(parse_adapter_output("not json", &blocked(&["spotify"]), now_sys, now).is_err());
+    }
+
+    #[test]
+    fn adapter_artwork_fields() {
+        let (now_sys, now) = fixed_now();
+        let artwork = |json: &str| {
+            parse_adapter_output(json, &[], now_sys, now)
+                .unwrap()
+                .unwrap()
+                .artwork
+        };
+        assert_eq!(
+            artwork(r#"{"title":"T","artworkData":"R0lGODlh"}"#),
+            Some(AdapterArtwork {
+                data: "R0lGODlh".into(),
+                mime: None,
+            })
+        );
+        assert_eq!(
+            artwork(r#"{"title":"T","artworkData":"R0lGODlh","artworkMimeType":" "}"#)
+                .unwrap()
+                .mime,
+            None
+        );
+        for json in [
+            r#"{"title":"T"}"#,
+            r#"{"title":"T","artworkMimeType":"image/png"}"#,
+            r#"{"title":"T","artworkData":"","artworkMimeType":"image/png"}"#,
+            r#"{"title":"T","artworkData":"  ","artworkMimeType":"image/png"}"#,
+            r#"{"title":"T","artworkData":null}"#,
+            r#"{"title":"T","artworkData":[1,2]}"#,
+        ] {
+            assert_eq!(artwork(json), None, "{json}");
+        }
     }
 
     #[test]
@@ -1607,10 +1824,12 @@ mod tests {
         assert!(err.to_string().contains("could not run"), "{err}");
     }
 
-    /// A stand-in for osascript: answers the running check, then each app's query.
+    /// A stand-in for osascript: answers the running check, Spotify's cover
+    /// art, then each app's query.
     #[cfg(unix)]
     const FAKE_OSASCRIPT: &str = r#"case "$*" in
   *"on isRunning"*) printf 'true\037true\n' ;;
+  *"artwork url"*) printf 'https://i.scdn.co/image/ab67616d0000b273\n' ;;
   *'tell application "Spotify"'*) printf 'playing\037Song\037Artist\037Album\037215000\03712,5\037spotify:track:4uLU6hMCjMI75M1A2tKUQC\n' ;;
   *'tell application "Music"'*) printf 'paused\037Other Song\037Someone\037\037200,5\0373\037\n' ;;
   *) exit 1 ;;
@@ -1718,7 +1937,8 @@ esac"#,
         let snapshot = read_adapter(&perl, Path::new("/opt/mediaremote-adapter"), &[])
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .snapshot;
         assert_eq!(snapshot.app_id, "com.google.Chrome");
         assert_eq!(snapshot.position_ms, 4_000);
         assert_eq!(snapshot.track.duration_ms, Some(100_000));
@@ -1844,6 +2064,100 @@ esac"#,
             source.read_with(&perl_null, &osascript).await.unwrap(),
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn artwork_of_the_picked_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let osascript = fake_program(dir.path(), "osascript", FAKE_OSASCRIPT);
+        let no_osascript = "/definitely/not/osascript";
+
+        let source = MacSource::new(None, vec![], vec![]);
+        assert_eq!(source.artwork_with(no_osascript).await.unwrap(), None);
+
+        // Spotify plays: its cover URL is asked from Spotify.
+        let picked = source.read_with(no_osascript, &osascript).await.unwrap();
+        assert_eq!(picked.unwrap().app_id, "com.spotify.client");
+        assert_eq!(
+            source.artwork_with(&osascript).await.unwrap().as_deref(),
+            Some("https://i.scdn.co/image/ab67616d0000b273")
+        );
+        assert!(source.artwork_with(no_osascript).await.is_err());
+
+        // Apple Music: no cover, and osascript is not even started.
+        let source = MacSource::new(None, vec![], vec!["spotify".into()]);
+        let picked = source.read_with(no_osascript, &osascript).await.unwrap();
+        assert_eq!(picked.unwrap().app_id, "com.apple.Music");
+        assert_eq!(source.artwork_with(no_osascript).await.unwrap(), None);
+
+        // Nothing playing (everything blocked): no cover either.
+        let source = MacSource::new(None, vec![], vec!["spotify".into(), "music".into()]);
+        assert_eq!(
+            source.read_with(no_osascript, &osascript).await.unwrap(),
+            None
+        );
+        assert_eq!(source.artwork_with(no_osascript).await.unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn artwork_from_the_adapter() {
+        let dir = tempfile::tempdir().unwrap();
+        let osascript = fake_program(dir.path(), "osascript", FAKE_OSASCRIPT);
+        let no_osascript = "/definitely/not/osascript";
+        let adapter_dir = Some(dir.path().to_path_buf());
+
+        // A PNG, with the type the adapter reports.
+        let perl = fake_program(
+            dir.path(),
+            "perl",
+            r#"printf '{"bundleIdentifier":"com.google.Chrome","playing":true,"title":"Video","artist":"Channel","artworkMimeType":"image/png","artworkData":"iVBORw0KGgoAAAANSUhEUg=="}\n'"#,
+        );
+        let source = MacSource::new(adapter_dir.clone(), vec![], vec![]);
+        source
+            .read_with(&perl, no_osascript)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.artwork_with(no_osascript).await.unwrap().as_deref(),
+            Some("data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==")
+        );
+
+        // Not an image: nothing.
+        let perl = fake_program(
+            dir.path(),
+            "perl-text",
+            r#"printf '{"title":"Video","playing":true,"artworkMimeType":"text/html","artworkData":"PGh0bWw+"}\n'"#,
+        );
+        source
+            .read_with(&perl, no_osascript)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(source.artwork_with(no_osascript).await.unwrap(), None);
+
+        // Spotify through the adapter without artwork data: asked from Spotify.
+        let perl = fake_program(
+            dir.path(),
+            "perl-spotify",
+            r#"printf '{"bundleIdentifier":"com.spotify.client","playing":true,"title":"Song","artist":"Artist"}\n'"#,
+        );
+        source
+            .read_with(&perl, no_osascript)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.artwork_with(&osascript).await.unwrap().as_deref(),
+            Some("https://i.scdn.co/image/ab67616d0000b273")
+        );
+
+        // Nothing playing: no cover.
+        let perl = fake_program(dir.path(), "perl-null", "printf 'null\\n'");
+        assert_eq!(source.read_with(&perl, no_osascript).await.unwrap(), None);
+        assert_eq!(source.artwork_with(no_osascript).await.unwrap(), None);
     }
 
     #[cfg(not(target_os = "macos"))]

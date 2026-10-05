@@ -285,6 +285,12 @@ impl SyncClock {
         self.state.as_ref().map(|state| state.status)
     }
 
+    /// The rate the position is extrapolated with (a non-finite rate counts
+    /// as 1.0), or `None` before any snapshot.
+    pub fn rate(&self) -> Option<f64> {
+        self.state.as_ref().map(|state| state.rate)
+    }
+
     /// Forgets everything (used when nothing is playing any more).
     pub fn reset(&mut self) {
         self.state = None;
@@ -346,6 +352,7 @@ mod tests {
         let clock = SyncClock::new();
         assert_eq!(clock.position_ms(base()), None);
         assert_eq!(clock.status(), None);
+        assert_eq!(clock.rate(), None);
         let default = SyncClock::default();
         assert_eq!(default.position_ms(base()), None);
         assert_eq!(default.status(), None);
@@ -972,10 +979,12 @@ mod tests {
         let track = song("A", Some(300_000));
         let mut clock = SyncClock::new();
         clock.update(&playing(&track, 10_000, t0));
+        assert_eq!(clock.rate(), Some(1.0));
         // A fresh position with a new rate re-anchors.
         let event = clock.update(&with_rate(playing(&track, 12_000, t0 + ms(2_000)), 2.0));
         assert_eq!(event, ClockEvent::Steady);
         assert_eq!(clock.position_ms(t0 + ms(3_000)), Some(14_000));
+        assert_eq!(clock.rate(), Some(2.0));
 
         // A stale position with a new rate rebases at the predicted position.
         let mut clock = SyncClock::new();
@@ -1000,6 +1009,7 @@ mod tests {
             let mut clock = SyncClock::new();
             clock.update(&with_rate(playing(&track, 1_000, t0), rate));
             assert_eq!(clock.position_ms(t0 + ms(1_000)), Some(2_000), "{rate}");
+            assert_eq!(clock.rate(), Some(1.0), "{rate}");
         }
 
         let mut clock = SyncClock::new();

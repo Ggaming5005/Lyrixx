@@ -37,7 +37,8 @@ pub struct NowView {
     pub playing: bool,
     /// Playback position at `position_at_unix_ms`. While `playing`, the
     /// position at any later moment is
-    /// `position_ms + (now_unix_ms - position_at_unix_ms) * rate`.
+    /// `position_ms + (now_unix_ms - position_at_unix_ms) * rate`, stopping
+    /// at `duration_ms` when it is known (as the engine's clock does).
     /// The engine only moves this anchor on a jump (track change, seek,
     /// play/pause, rate change, or drift above 250 ms), so it does not change
     /// on every poll.

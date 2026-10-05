@@ -10,6 +10,7 @@
 //! picks one with [`pick_session`]. When the picked player is stopped, the
 //! source reports `Ok(None)`: nothing is playing or paused.
 
+mod artwork;
 #[cfg(any(target_os = "macos", test))]
 pub mod macos;
 #[cfg(target_os = "linux")]

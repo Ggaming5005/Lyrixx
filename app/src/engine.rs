@@ -7,7 +7,7 @@ use crate::providers::{ProviderChain, Resolved};
 use crate::sources::NowPlayingSource;
 use crate::targets::{StatusTarget, TargetError};
 use crate::types::{Lyrics, PlaybackSnapshot, PlaybackStatus, Status, Track};
-use crate::view::EngineView;
+use crate::view::{EngineView, LineView, LyricsView, NowView, StatusView, TargetState, TargetView};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -34,6 +34,11 @@ const REPEAT_LOG_EVERY: Duration = Duration::from_secs(60);
 /// Polls are never more frequent than this, whatever the settings say
 /// ([`Config::validate`] reports lower values as an error).
 const MIN_POLL_INTERVAL_MS: u64 = 100;
+/// Longest wait for one cover art read; longer means no cover for the song.
+const ARTWORK_TIMEOUT: Duration = Duration::from_secs(5);
+/// The view's position anchor moves when the clock is further than this from
+/// where the published anchor puts the song.
+const VIEW_DRIFT_MS: u64 = 250;
 
 /// Runs Lyrix until shutdown.
 ///
@@ -61,6 +66,12 @@ const MIN_POLL_INTERVAL_MS: u64 = 100;
 ///   is logged once at error level and never used again in this run.
 /// - On shutdown every target that is showing something is cleared, waiting at
 ///   most 2 s per target.
+/// - With a view ([`Engine::with_view`]), an [`EngineView`] is published right
+///   after each turn of the loop updated the state and the targets, only when
+///   it differs from the one published last. Every track change also reads
+///   the song's cover art from the source, once, for the view. Without a view
+///   neither happens. Targets are optional: with none, the engine only
+///   follows the song for the view.
 ///
 /// Details:
 /// - Targets are updated one after the other. Each `set` or `clear` may take
@@ -89,6 +100,22 @@ const MIN_POLL_INTERVAL_MS: u64 = 100;
 /// - Shutdown is noticed at any moment: a source read or a `set` / `clear`
 ///   still under way is abandoned (a target whose `set` was abandoned counts
 ///   as showing something, so it is cleared).
+/// - The view's lyrics are "searching" until the lookup for this song comes
+///   back, then the lines the engine uses (unsynced lyrics with their spread
+///   timings), or "not found". Its status is the desired status.
+/// - The view's position anchor (`position_ms` at `position_at_unix_ms`, wall
+///   clock) moves only on a jump: a track change, play/pause, a rate change,
+///   or the clock more than 250 ms away from where the anchor puts the song
+///   now (a seek). Smooth progress publishes nothing.
+/// - A target's view state follows its last send: `starting` before any
+///   answer, `showing` / `cleared` after a successful `set` / `clear`,
+///   `waiting` on `Unavailable`, `rateLimited` on a backoff, `retrying` on
+///   another error or a timeout, `off` once switched off.
+/// - The cover art is read alongside rendering, like the source, and may take
+///   at most 5 s. A track change abandons a read for the song before; a result
+///   for a song that is no longer playing is ignored. An error (logged at
+///   debug level) means no cover, as does a URL that is not `https:`,
+///   `http:` or `data:`.
 pub struct Engine {
     config: Config,
     source: Box<dyn NowPlayingSource>,
@@ -160,7 +187,7 @@ impl Engine {
             targets,
             offsets_path,
             pause_marker,
-            view: _view,
+            view,
             wall_clock,
         } = self;
 
@@ -177,9 +204,12 @@ impl Engine {
             offsets: OffsetsFile::new(offsets_path),
             source_errors: RepeatFilter::default(),
         };
+        let mut view = view.map(|sender| ViewPublisher::new(sender, source.name()));
 
         tracing::debug!(source = source.name(), "starting");
         tokio::pin!(shutdown);
+        // The targets are "starting" while the first clear is under way.
+        publish(&mut view, &state, &slots);
 
         // Clear whatever an earlier run (or a crash) left behind.
         for slot in &mut slots {
@@ -190,6 +220,7 @@ impl Engine {
             () = &mut shutdown => false,
             () = flush(&mut slots, &state) => true,
         };
+        publish(&mut view, &state, &slots);
 
         let poll_every =
             Duration::from_millis(config.general.poll_interval_ms.max(MIN_POLL_INTERVAL_MS));
@@ -198,6 +229,8 @@ impl Engine {
         // The source read under way. It runs alongside rendering, so a slow
         // or stuck player never holds up lyric lines (the clock keeps time).
         let mut reading: Option<SourceRead<'_>> = None;
+        // The cover art read under way, the same way (only with a view).
+        let mut artwork: Option<ArtworkRead<'_>> = None;
 
         while running {
             let deadline = state.next_wake(&slots, Instant::now());
@@ -209,6 +242,9 @@ impl Engine {
                 result = finish_read(&mut reading), if reading.is_some() => Wake::Read(result),
                 Some((generation, resolved)) = lookup_rx.recv() => {
                     Wake::Lookup(generation, resolved)
+                }
+                (generation, result) = finish_artwork(&mut artwork), if artwork.is_some() => {
+                    Wake::Artwork(generation, result)
                 }
                 _ = poll.tick() => Wake::Poll,
                 () = tokio::time::sleep_until(deadline) => Wake::Render,
@@ -227,10 +263,18 @@ impl Engine {
                 }
                 Wake::Read(result) => {
                     reading = None;
-                    state.on_source(result, &chain, &lookup_tx);
+                    let new_song = state.on_source(result, &chain, &lookup_tx);
                     state.refresh_offsets();
+                    if new_song && view.is_some() {
+                        // Replaces a read for the song before.
+                        artwork = Some(start_artwork(&*source, state.generation));
+                    }
                 }
                 Wake::Lookup(generation, resolved) => state.on_lookup(generation, resolved),
+                Wake::Artwork(generation, result) => {
+                    artwork = None;
+                    state.on_artwork(generation, result);
+                }
                 Wake::Render => {}
             }
 
@@ -244,9 +288,11 @@ impl Engine {
                     flush(&mut slots, &state).await;
                 } => true,
             };
+            publish(&mut view, &state, &slots);
         }
-        // Abandon a read that is still under way.
+        // Abandon reads that are still under way.
         drop(reading);
+        drop(artwork);
 
         tracing::debug!("shutting down");
         for slot in slots.iter_mut().filter(|s| s.enabled && s.maybe_showing()) {
@@ -272,6 +318,7 @@ enum Wake {
     Poll,
     Read(SourceResult),
     Lookup(u64, Resolved),
+    Artwork(u64, anyhow::Result<Option<String>>),
     Render,
 }
 
@@ -303,15 +350,55 @@ async fn finish_read(reading: &mut Option<SourceRead<'_>>) -> SourceResult {
     }
 }
 
+/// A cover art read under way for the song of `generation`, limited to
+/// [`ARTWORK_TIMEOUT`].
+struct ArtworkRead<'a> {
+    generation: u64,
+    read: Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + Send + 'a>>,
+}
+
+/// Starts reading the cover art of the song of `generation`.
+fn start_artwork(source: &dyn NowPlayingSource, generation: u64) -> ArtworkRead<'_> {
+    let read = source.artwork();
+    ArtworkRead {
+        generation,
+        read: Box::pin(async move {
+            match tokio::time::timeout(ARTWORK_TIMEOUT, read).await {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!(
+                    "the player did not hand over the cover art within {} s",
+                    ARTWORK_TIMEOUT.as_secs()
+                )),
+            }
+        }),
+    }
+}
+
+/// Waits for the cover art read under way; never finishes when there is none.
+async fn finish_artwork(
+    artwork: &mut Option<ArtworkRead<'_>>,
+) -> (u64, anyhow::Result<Option<String>>) {
+    match artwork {
+        Some(artwork) => (artwork.generation, artwork.read.as_mut().await),
+        None => std::future::pending().await,
+    }
+}
+
 /// The song being followed.
 struct Playing {
     /// The track as the source reports it (updated on every poll).
     track: Track,
+    /// The playing app as the source reports it (updated on every poll).
+    app_id: String,
     /// `None` while the lookup runs and when nothing was found.
     lyrics: Option<Lyrics>,
+    /// The lookup for this song has not come back yet.
+    searching: bool,
     /// [`crate::matcher::song_key`] of the normalized track.
     key: String,
     song_offset_ms: i64,
+    /// Cover art URL, once read (only with a view).
+    artwork: Option<String>,
 }
 
 /// Everything the loop knows, apart from the targets.
@@ -417,12 +504,13 @@ impl State<'_> {
         }
     }
 
+    /// Takes a source reading. True when a new song started.
     fn on_source(
         &mut self,
         result: anyhow::Result<Option<PlaybackSnapshot>>,
         chain: &Arc<ProviderChain>,
         lookup_tx: &mpsc::UnboundedSender<(u64, Resolved)>,
-    ) {
+    ) -> bool {
         match result {
             Err(e) => {
                 let message = format!("{e:#}");
@@ -434,6 +522,7 @@ impl State<'_> {
                 } else {
                     tracing::debug!("could not read what is playing: {message}");
                 }
+                false
             }
             Ok(None) => {
                 if self.playing.is_some() {
@@ -442,6 +531,7 @@ impl State<'_> {
                 self.clock.reset();
                 self.playing = None;
                 self.generation = self.generation.wrapping_add(1);
+                false
             }
             Ok(Some(snapshot)) => {
                 let event = self.clock.update(&snapshot);
@@ -449,8 +539,13 @@ impl State<'_> {
                     Some(playing) if event != ClockEvent::TrackChanged => {
                         // Same song; take fields the identity ignores (a Spotify id).
                         playing.track = snapshot.track;
+                        playing.app_id = snapshot.app_id;
+                        false
                     }
-                    _ => self.start_song(snapshot.track, chain, lookup_tx),
+                    _ => {
+                        self.start_song(snapshot.track, snapshot.app_id, chain, lookup_tx);
+                        true
+                    }
                 }
             }
         }
@@ -460,6 +555,7 @@ impl State<'_> {
     fn start_song(
         &mut self,
         track: Track,
+        app_id: String,
         chain: &Arc<ProviderChain>,
         lookup_tx: &mpsc::UnboundedSender<(u64, Resolved)>,
     ) {
@@ -482,9 +578,12 @@ impl State<'_> {
 
         self.playing = Some(Playing {
             track,
+            app_id,
             lyrics: None,
+            searching: true,
             key,
             song_offset_ms,
+            artwork: None,
         });
     }
 
@@ -496,6 +595,7 @@ impl State<'_> {
         let Some(playing) = self.playing.as_mut() else {
             return;
         };
+        playing.searching = false;
         match resolved {
             Resolved::Found(lyrics) => {
                 tracing::info!(
@@ -510,6 +610,26 @@ impl State<'_> {
                 tracing::info!("no lyrics found");
                 playing.lyrics = None;
             }
+        }
+    }
+
+    /// The cover art read for the song of `generation` finished.
+    fn on_artwork(&mut self, generation: u64, result: anyhow::Result<Option<String>>) {
+        if generation != self.generation {
+            tracing::debug!("dropping cover art for a song that is no longer playing");
+            return;
+        }
+        let Some(playing) = self.playing.as_mut() else {
+            return;
+        };
+        match result {
+            Ok(Some(url)) if is_window_url(&url) => playing.artwork = Some(url),
+            Ok(Some(url)) => {
+                let start: String = url.chars().take(40).collect();
+                tracing::debug!("ignoring cover art that a window cannot load: {start}");
+            }
+            Ok(None) => {}
+            Err(e) => tracing::debug!("no cover art: {e:#}"),
         }
     }
 
@@ -544,6 +664,10 @@ struct Slot {
     /// The last send failed (for logging the recovery).
     failing: bool,
     errors: RepeatFilter,
+    /// How the target is doing, for the view.
+    view_state: TargetState,
+    /// Why, for the states that are not fine.
+    view_detail: Option<String>,
 }
 
 impl Slot {
@@ -559,7 +683,22 @@ impl Slot {
             set_attempted: false,
             failing: false,
             errors: RepeatFilter::default(),
+            view_state: TargetState::Starting,
+            view_detail: None,
         }
+    }
+
+    fn view(&self) -> TargetView {
+        TargetView {
+            id: self.name.to_string(),
+            state: self.view_state,
+            detail: self.view_detail.clone(),
+        }
+    }
+
+    fn show_state(&mut self, state: TargetState, detail: Option<String>) {
+        self.view_state = state;
+        self.view_detail = detail;
     }
 
     fn maybe_showing(&self) -> bool {
@@ -568,6 +707,11 @@ impl Slot {
 
     /// Sends `value` and reports the outcome to the pacer.
     async fn send(&mut self, value: Option<Status>) {
+        let shown = if value.is_some() {
+            TargetState::Showing
+        } else {
+            TargetState::Cleared
+        };
         let attempt = match &value {
             Some(status) => {
                 self.set_attempted = true;
@@ -584,6 +728,7 @@ impl Slot {
                 }
                 self.pacer.on_success();
                 self.retry_at = None;
+                self.show_state(shown, None);
                 if self.failing {
                     tracing::info!(target_name = self.name, "working again");
                     self.failing = false;
@@ -596,6 +741,11 @@ impl Slot {
                 {
                     RateLimitAction::Backoff(wait) => {
                         self.failing = true;
+                        let seconds = wait.as_millis().div_ceil(1000);
+                        self.show_state(
+                            TargetState::RateLimited,
+                            Some(format!("rate limited, waiting {seconds} s")),
+                        );
                         tracing::warn!(
                             target_name = self.name,
                             "rate limited, waiting {} ms before the next update",
@@ -612,6 +762,12 @@ impl Slot {
             }
             Ok(Err(e @ (TargetError::Unavailable(_) | TargetError::Other(_)))) => {
                 self.failed(value, now, &e.to_string());
+                match e {
+                    TargetError::Unavailable(message) => {
+                        self.show_state(TargetState::Waiting, Some(message));
+                    }
+                    other => self.show_state(TargetState::Retrying, Some(format!("{other:#}"))),
+                }
             }
             Err(_) => {
                 let message = format!(
@@ -619,6 +775,7 @@ impl Slot {
                     SEND_TIMEOUT.as_secs()
                 );
                 self.failed(value, now, &message);
+                self.show_state(TargetState::Retrying, Some(message));
             }
         }
     }
@@ -642,6 +799,7 @@ impl Slot {
 
     fn switch_off(&mut self, reason: &str) {
         self.enabled = false;
+        self.show_state(TargetState::Off, Some(reason.to_string()));
         tracing::error!(
             target_name = self.name,
             "{reason}; not using {} again until Lyrix restarts",
@@ -677,6 +835,227 @@ async fn flush(slots: &mut [Slot], state: &State<'_>) {
         }
         if let Some(value) = slot.pacer.poll(now.into_std()) {
             slot.send(value).await;
+        }
+    }
+}
+
+/// Publishes the view, when there is one.
+fn publish(view: &mut Option<ViewPublisher>, state: &State<'_>, slots: &[Slot]) {
+    if let Some(view) = view {
+        view.publish(state, slots);
+    }
+}
+
+/// Publishes the [`EngineView`] for a window (see [`Engine::with_view`]).
+struct ViewPublisher {
+    sender: watch::Sender<EngineView>,
+    /// [`NowPlayingSource::name`].
+    source: &'static str,
+    /// The position anchor published last.
+    anchor: Option<Anchor>,
+    /// What the published lyrics and cover art belong to.
+    heavy: Option<HeavyKey>,
+}
+
+/// The lyrics and the cover art of the song in the view only change with the
+/// song (its generation), when its lookup comes back and when its cover
+/// arrives. While this key stays the same they are neither rebuilt nor
+/// compared, so a long song with a large cover costs nothing per turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeavyKey {
+    generation: u64,
+    searching: bool,
+    has_artwork: bool,
+}
+
+impl ViewPublisher {
+    fn new(sender: watch::Sender<EngineView>, source: &'static str) -> Self {
+        Self {
+            sender,
+            source,
+            anchor: None,
+            heavy: None,
+        }
+    }
+
+    /// Sends the view when it differs from the one published last.
+    fn publish(&mut self, state: &State<'_>, slots: &[Slot]) {
+        let status = state.desired().map(|status| StatusView {
+            text: status.text,
+            kind: status.kind.into(),
+            line: status.line,
+            estimated: status.estimated,
+        });
+        let targets: Vec<TargetView> = slots.iter().map(Slot::view).collect();
+        let song = state.playing.as_ref().map(|playing| {
+            let anchor = Anchor::follow(self.anchor, Anchor::now(state), playing.track.duration_ms);
+            (playing, anchor)
+        });
+        self.anchor = song.map(|(_, anchor)| anchor);
+        let heavy = song.map(|(playing, _)| HeavyKey {
+            generation: state.generation,
+            searching: playing.searching,
+            has_artwork: playing.artwork.is_some(),
+        });
+        let same_heavy = heavy.is_some() && heavy == self.heavy;
+        self.heavy = heavy;
+        let source = self.source;
+
+        self.sender.send_if_modified(|view| {
+            let mut changed = false;
+            if view.source != source {
+                view.source = source.to_string();
+                changed = true;
+            }
+            changed |= assign(&mut view.paused, state.paused_by_marker);
+            match (song, view.now.as_mut()) {
+                (Some((playing, anchor)), Some(now)) if same_heavy => {
+                    // The published lyrics and cover are still right: compare
+                    // everything else, without copying them.
+                    let lyrics = std::mem::replace(&mut now.lyrics, LyricsView::Searching);
+                    let artwork = now.artwork.take();
+                    let fresh = now_view(state, playing, &anchor, LyricsView::Searching, None);
+                    changed |= assign(now, fresh);
+                    now.lyrics = lyrics;
+                    now.artwork = artwork;
+                }
+                (Some((playing, anchor)), _) => {
+                    let lyrics = lyrics_view(playing);
+                    let fresh = now_view(state, playing, &anchor, lyrics, playing.artwork.clone());
+                    changed |= assign(&mut view.now, Some(fresh));
+                }
+                (None, _) => changed |= assign(&mut view.now, None),
+            }
+            changed |= assign(&mut view.status, status);
+            changed |= assign(&mut view.targets, targets);
+            changed
+        });
+    }
+}
+
+/// The song for the view, with the given lyrics and cover art.
+fn now_view(
+    state: &State<'_>,
+    playing: &Playing,
+    anchor: &Anchor,
+    lyrics: LyricsView,
+    artwork: Option<String>,
+) -> NowView {
+    NowView {
+        title: playing.track.title.clone(),
+        artist: playing.track.artist.clone(),
+        album: playing.track.album.clone(),
+        duration_ms: playing.track.duration_ms,
+        app: playing.app_id.clone(),
+        playing: anchor.playing,
+        position_ms: anchor.position_ms,
+        position_at_unix_ms: anchor.at_unix_ms,
+        rate: anchor.rate,
+        artwork,
+        song_key: playing.key.clone(),
+        song_offset_ms: playing.song_offset_ms,
+        global_offset_ms: state.config.general.offset_ms,
+        lyrics,
+    }
+}
+
+/// Where the song's lyrics lookup stands, with the lines the engine uses.
+fn lyrics_view(playing: &Playing) -> LyricsView {
+    match &playing.lyrics {
+        _ if playing.searching => LyricsView::Searching,
+        None => LyricsView::NotFound,
+        Some(lyrics) => LyricsView::Found {
+            lines: lyrics.lines.iter().map(LineView::from).collect(),
+            synced: lyrics.synced,
+            instrumental: lyrics.instrumental,
+            source: lyrics.source.clone(),
+        },
+    }
+}
+
+/// Sets `slot` to `value` when they differ. True when it changed.
+fn assign<T: PartialEq>(slot: &mut T, value: T) -> bool {
+    if *slot == value {
+        false
+    } else {
+        *slot = value;
+        true
+    }
+}
+
+/// URLs a window can load: `https:`, `http:` and `data:`.
+fn is_window_url(url: &str) -> bool {
+    ["https:", "http:", "data:"].iter().any(|scheme| {
+        url.get(..scheme.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(scheme))
+    })
+}
+
+/// The song position as the view gives it: the song was at `position_ms` at
+/// `at_unix_ms` (wall clock), moving at `rate` while `playing`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Anchor {
+    /// The song it belongs to ([`State::generation`]).
+    generation: u64,
+    playing: bool,
+    rate: f64,
+    position_ms: u64,
+    at_unix_ms: u64,
+}
+
+impl Anchor {
+    /// Where the clock is now.
+    fn now(state: &State<'_>) -> Self {
+        Self {
+            generation: state.generation,
+            playing: state.clock.status() == Some(PlaybackStatus::Playing),
+            rate: state.clock.rate().unwrap_or(1.0),
+            position_ms: state
+                .clock
+                .position_ms(Instant::now().into_std())
+                .unwrap_or(0),
+            at_unix_ms: (state.wall_clock)(),
+        }
+    }
+
+    /// Where this anchor puts the song at `unix_ms`. Like the clock, it stops
+    /// at the end of the song (`duration_ms`, when known) and at 0.
+    fn position_at(&self, unix_ms: u64, duration_ms: Option<u64>) -> u64 {
+        if !self.playing {
+            return self.position_ms;
+        }
+        // Precision loss above 2^53 ms does not matter here.
+        let moved = unix_ms.saturating_sub(self.at_unix_ms) as f64 * self.rate;
+        // `as` saturates: an absurd value becomes 0 or u64::MAX, never wraps.
+        let position = if moved >= 0.0 {
+            self.position_ms.saturating_add(moved as u64)
+        } else {
+            self.position_ms.saturating_sub((-moved) as u64)
+        };
+        match duration_ms {
+            Some(duration) if duration > 0 => position.min(duration),
+            _ => position,
+        }
+    }
+
+    /// The anchor to publish: `published` while `current` (the clock now)
+    /// only shows smooth progress from it, else `current`. A jump is another
+    /// song, play/pause, another rate, or the clock more than
+    /// [`VIEW_DRIFT_MS`] from where `published` puts the song now.
+    fn follow(published: Option<Self>, current: Self, duration_ms: Option<u64>) -> Self {
+        match published {
+            Some(published)
+                if published.generation == current.generation
+                    && published.playing == current.playing
+                    && (published.rate - current.rate).abs() <= f64::EPSILON
+                    && published
+                        .position_at(current.at_unix_ms, duration_ms)
+                        .abs_diff(current.position_ms)
+                        <= VIEW_DRIFT_MS =>
+            {
+                published
+            }
+            _ => current,
         }
     }
 }
@@ -774,6 +1153,7 @@ mod tests {
     use super::*;
     use crate::providers::LyricsProvider;
     use crate::types::{LyricLine, StatusKind};
+    use crate::view::StatusKindView;
     use async_trait::async_trait;
     use std::collections::VecDeque;
     use std::sync::Mutex;
@@ -817,6 +1197,20 @@ mod tests {
         in_flight: usize,
         /// The most reads in flight at the same time.
         max_in_flight: usize,
+        /// The player has covers: [`cover_of`] the song playing when asked.
+        covers: bool,
+        /// Cover art reads fail with this message.
+        cover_error: Option<String>,
+        /// How long each cover art read takes; `None` = never finishes.
+        cover_latency: Option<Duration>,
+        cover_reads: usize,
+        /// Cover art reads that have started but not finished.
+        covers_in_flight: usize,
+    }
+
+    /// The cover URL the fake player gives for `title`.
+    fn cover_of(title: &str) -> String {
+        format!("https://covers.example/{}.jpg", title.replace(' ', "-"))
     }
 
     /// Controls a [`FakeSource`] from the test.
@@ -827,6 +1221,7 @@ mod tests {
         fn default() -> Self {
             Self(Arc::new(Mutex::new(SourceState {
                 latency: Some(Duration::ZERO),
+                cover_latency: Some(Duration::ZERO),
                 ..SourceState::default()
             })))
         }
@@ -839,6 +1234,16 @@ mod tests {
         fn drop(&mut self) {
             let mut state = self.0 .0.lock().unwrap();
             state.in_flight = state.in_flight.saturating_sub(1);
+        }
+    }
+
+    /// The same for a cover art read.
+    struct CoverInFlight(SourceHandle);
+
+    impl Drop for CoverInFlight {
+        fn drop(&mut self) {
+            let mut state = self.0 .0.lock().unwrap();
+            state.covers_in_flight = state.covers_in_flight.saturating_sub(1);
         }
     }
 
@@ -899,6 +1304,33 @@ mod tests {
         fn max_in_flight(&self) -> usize {
             self.0.lock().unwrap().max_in_flight
         }
+
+        /// The player has cover art from now on (see [`cover_of`]).
+        fn with_covers(&self) {
+            self.0.lock().unwrap().covers = true;
+        }
+
+        /// Cover art reads from now on take `ms`.
+        fn slow_covers(&self, ms: u64) {
+            self.0.lock().unwrap().cover_latency = Some(Duration::from_millis(ms));
+        }
+
+        /// Cover art reads from now on never finish.
+        fn hang_covers(&self) {
+            self.0.lock().unwrap().cover_latency = None;
+        }
+
+        fn fail_covers(&self, message: &str) {
+            self.0.lock().unwrap().cover_error = Some(message.into());
+        }
+
+        fn cover_reads(&self) -> usize {
+            self.0.lock().unwrap().cover_reads
+        }
+
+        fn covers_in_flight(&self) -> usize {
+            self.0.lock().unwrap().covers_in_flight
+        }
     }
 
     /// A player that is read live, like MPRIS.
@@ -931,6 +1363,31 @@ mod tests {
                 (result, state.latency)
             };
             let _in_flight = InFlight(self.0.clone());
+            match latency {
+                Some(latency) if latency.is_zero() => {}
+                Some(latency) => tokio::time::sleep(latency).await,
+                None => std::future::pending::<()>().await,
+            }
+            result
+        }
+
+        /// The cover of the song playing when asked (not when answering).
+        async fn artwork(&self) -> anyhow::Result<Option<String>> {
+            let (result, latency) = {
+                let mut state = self.0 .0.lock().unwrap();
+                state.cover_reads += 1;
+                state.covers_in_flight += 1;
+                let result = match &state.cover_error {
+                    Some(message) => Err(anyhow::anyhow!(message.clone())),
+                    None => Ok(state
+                        .playback
+                        .as_ref()
+                        .filter(|_| state.covers)
+                        .map(|p| cover_of(&p.track.title))),
+                };
+                (result, state.cover_latency)
+            };
+            let _in_flight = CoverInFlight(self.0.clone());
             match latency {
                 Some(latency) if latency.is_zero() => {}
                 Some(latency) => tokio::time::sleep(latency).await,
@@ -1184,6 +1641,55 @@ mod tests {
             let _ = stopped.await;
         }));
         Running { t0, stop, task }
+    }
+
+    /// What a window saw of the engine's view.
+    struct ViewLog {
+        receiver: watch::Receiver<EngineView>,
+        /// Every view seen, with its time in ms since the start.
+        seen: Arc<Mutex<Vec<(u64, EngineView)>>>,
+    }
+
+    impl ViewLog {
+        /// The view published last.
+        fn current(&self) -> EngineView {
+            self.receiver.borrow().clone()
+        }
+
+        /// The song in the view published last.
+        #[track_caller]
+        fn now(&self) -> NowView {
+            self.current().now.expect("a song in the view")
+        }
+
+        fn seen(&self) -> Vec<(u64, EngineView)> {
+            self.seen.lock().unwrap().clone()
+        }
+
+        /// When views were seen within `from..=to` ms.
+        fn times_between(&self, from: u64, to: u64) -> Vec<u64> {
+            self.seen()
+                .into_iter()
+                .map(|(at, _)| at)
+                .filter(|at| (from..=to).contains(at))
+                .collect()
+        }
+    }
+
+    /// Makes `engine` publish its view, watched like a window does.
+    fn watched(engine: Engine, t0: Instant) -> (Engine, ViewLog) {
+        let (sender, receiver) = watch::channel(EngineView::default());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut window = receiver.clone();
+        let log = Arc::clone(&seen);
+        tokio::spawn(async move {
+            while window.changed().await.is_ok() {
+                let view = window.borrow_and_update().clone();
+                let at = Instant::now().duration_since(t0).as_millis() as u64;
+                log.lock().unwrap().push((at, view));
+            }
+        });
+        (engine.with_view(sender), ViewLog { receiver, seen })
     }
 
     fn engine(
@@ -2396,6 +2902,720 @@ mod tests {
         // Nothing was ever set, so there is nothing to clear on the way out.
         assert_eq!(stuck_log.calls(), [(0, Call::Clear)]);
         assert_eq!(source.reads(), 0);
+    }
+
+    // ---------------------------------------------------------------------
+    // The view
+    // ---------------------------------------------------------------------
+
+    fn target_view(id: &str, state: TargetState, detail: Option<&str>) -> TargetView {
+        TargetView {
+            id: id.into(),
+            state,
+            detail: detail.map(str::to_string),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_view_follows_the_song_from_searching_to_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let offsets = dir.path().join("offsets.toml");
+        save_offset(&offsets, &song("Song"), 1_000);
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.play(song("Song"), 0);
+        let lyrics =
+            FakeLyrics::default().with("Song", 2_000, synced(&[(1_000, "One"), (3_000, "Two")]));
+        let mut config = config();
+        config.general.offset_ms = 500;
+        // No targets: a window can run the engine only to show lyrics.
+        let (engine, view) = watched(
+            engine(config, &source, lyrics, Vec::new()).with_offsets_path(offsets),
+            t0,
+        );
+        let run = start(engine, t0);
+
+        run.until(1_000).await;
+        let searching = view.current();
+        run.until(2_600).await;
+        let found = view.current();
+        run.stop().await;
+
+        assert_eq!(searching.source, "fake");
+        assert!(!searching.paused);
+        assert!(searching.targets.is_empty());
+        assert_eq!(
+            searching.now,
+            Some(NowView {
+                title: "Song".into(),
+                artist: "Artist".into(),
+                album: None,
+                duration_ms: Some(300_000),
+                app: "fake.player".into(),
+                playing: true,
+                position_ms: 0,
+                position_at_unix_ms: WALL_BASE,
+                rate: 1.0,
+                artwork: None,
+                song_key: crate::matcher::song_key(&crate::matcher::normalize_track(&song("Song"))),
+                song_offset_ms: 1_000,
+                global_offset_ms: 500,
+                lyrics: LyricsView::Searching,
+            })
+        );
+        assert_eq!(
+            searching.status,
+            Some(StatusView {
+                text: "Song · Artist".into(),
+                kind: StatusKindView::NoLyrics,
+                line: None,
+                estimated: false,
+            })
+        );
+
+        let now = found.now.unwrap();
+        assert_eq!(
+            now.lyrics,
+            LyricsView::Found {
+                lines: vec![
+                    LineView {
+                        start_ms: 1_000,
+                        text: "One".into()
+                    },
+                    LineView {
+                        start_ms: 3_000,
+                        text: "Two".into()
+                    },
+                ],
+                synced: true,
+                instrumental: false,
+                source: "fake".into(),
+            }
+        );
+        // The anchor did not move: the song only went on.
+        assert_eq!((now.position_ms, now.position_at_unix_ms), (0, WALL_BASE));
+        // 1.5 s of offsets: "One" (1 s) from 2.5 s on.
+        assert_eq!(
+            found.status,
+            Some(StatusView {
+                text: "🎵 One".into(),
+                kind: StatusKindView::Line,
+                line: Some("One".into()),
+                estimated: false,
+            })
+        );
+
+        let mut states: Vec<LyricsView> = view
+            .seen()
+            .into_iter()
+            .filter_map(|(_, v)| v.now.map(|now| now.lyrics))
+            .collect();
+        states.dedup();
+        assert_eq!(states.len(), 2, "{states:?}");
+        assert_eq!(states[0], LyricsView::Searching);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_view_has_the_lines_the_engine_uses_or_not_found() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.play(song("Plain"), 0);
+        let plain = Lyrics {
+            lines: ["a", "b", "c"]
+                .iter()
+                .map(|text| LyricLine {
+                    start_ms: 0,
+                    text: text.to_string(),
+                })
+                .collect(),
+            synced: false,
+            instrumental: false,
+            source: String::new(),
+        };
+        let lyrics = FakeLyrics::default().with("Plain", 0, plain.clone());
+        let (engine, view) = watched(engine(config(), &source, lyrics, Vec::new()), t0);
+        let run = start(engine, t0);
+
+        run.until(100_000).await;
+        let plain_view = view.current();
+        source.play(song("Unknown"), 0);
+        run.until(101_000).await;
+        let unknown_view = view.current();
+        run.stop().await;
+
+        // Spread over the song, exactly as the status uses them.
+        let mut spread = plain;
+        spread.spread_evenly(300_000);
+        assert!(spread.lines[1].start_ms > 0);
+        assert_eq!(
+            plain_view.now.unwrap().lyrics,
+            LyricsView::Found {
+                lines: spread.lines.iter().map(LineView::from).collect(),
+                synced: false,
+                instrumental: false,
+                source: "fake".into(),
+            }
+        );
+        let status = plain_view.status.unwrap();
+        assert!(status.estimated);
+        assert_eq!(status.kind, StatusKindView::Line);
+
+        let now = unknown_view.now.unwrap();
+        assert_eq!(now.title, "Unknown");
+        assert_eq!(now.lyrics, LyricsView::NotFound);
+        assert_eq!(unknown_view.status.unwrap().kind, StatusKindView::NoLyrics);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_view_anchor_moves_on_a_seek_and_play_pause_only() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.play(song("Song"), 0);
+        let lyrics = FakeLyrics::default().with("Song", 0, synced(&[(0, "Hello")]));
+        let (fast, _log) = FakeTarget::new("fast", 0, t0);
+        let (engine, view) = watched(engine(config(), &source, lyrics, vec![fast]), t0);
+        let run = start(engine, t0);
+
+        run.until(2_050).await;
+        let start = view.now();
+        source.play(song("Song"), 60_000);
+        run.until(4_050).await;
+        let seeked = view.now();
+        source.pause();
+        run.until(6_050).await;
+        let paused = view.now();
+        source.resume();
+        run.until(8_000).await;
+        let resumed = view.now();
+        run.stop().await;
+
+        let anchor = |now: &NowView| (now.playing, now.position_ms, now.position_at_unix_ms);
+        assert_eq!(anchor(&start), (true, 0, WALL_BASE));
+        // Seen at the 2.5 s poll, 450 ms after the seek.
+        assert_eq!(anchor(&seeked), (true, 60_450, WALL_BASE + 2_500));
+        // Paused at 4.05 s (at 62 s in the song), seen at 4.5 s.
+        assert_eq!(anchor(&paused), (false, 62_000, WALL_BASE + 4_500));
+        // Resumed at 6.05 s, seen at 6.5 s.
+        assert_eq!(anchor(&resumed), (true, 62_450, WALL_BASE + 6_500));
+
+        // Nothing else was published: smooth progress is not a change.
+        assert_eq!(view.times_between(1, 8_000), [2_500, 4_500, 6_500]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_view_anchor_moves_when_the_clock_drifts_more_than_250_ms() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.play(song("Song"), 0);
+        let (engine, view) = watched(
+            engine(config(), &source, FakeLyrics::default(), Vec::new()),
+            t0,
+        );
+        let run = start(engine, t0);
+
+        // The player is 200 ms ahead at 1.05 s, seen at 1.5 s: the clock
+        // follows (well below a seek), the view does not need to.
+        run.until(1_050).await;
+        source.play(song("Song"), 1_250);
+        run.until(2_050).await;
+        let small = view.now();
+        // 200 ms more: 400 ms from the published anchor.
+        source.play(song("Song"), 2_450);
+        run.until(3_000).await;
+        let drifted = view.now();
+        run.stop().await;
+
+        assert_eq!(
+            (small.position_ms, small.position_at_unix_ms),
+            (0, WALL_BASE)
+        );
+        assert_eq!(
+            (drifted.position_ms, drifted.position_at_unix_ms),
+            (2_900, WALL_BASE + 2_500)
+        );
+        assert_eq!(view.times_between(1, 3_000), [2_500]);
+    }
+
+    #[test]
+    fn anchor_jumps() {
+        let anchor = Anchor {
+            generation: 1,
+            playing: true,
+            rate: 1.0,
+            position_ms: 10_000,
+            at_unix_ms: WALL_BASE,
+        };
+        let later = |ms: u64, position_ms: u64| Anchor {
+            position_ms,
+            at_unix_ms: WALL_BASE + ms,
+            ..anchor
+        };
+        let follow = |current: Anchor| Anchor::follow(Some(anchor), current, Some(300_000));
+
+        assert_eq!(Anchor::follow(None, anchor, None), anchor);
+        // Smooth progress and small differences keep the anchor.
+        assert_eq!(follow(later(5_000, 15_000)), anchor);
+        assert_eq!(follow(later(5_000, 15_250)), anchor);
+        assert_eq!(follow(later(5_000, 14_750)), anchor);
+        // More than 250 ms either way, another song, play/pause or another
+        // rate is a jump.
+        for current in [
+            later(5_000, 15_251),
+            later(5_000, 14_749),
+            later(5_000, 60_000),
+            Anchor {
+                generation: 2,
+                ..later(5_000, 15_000)
+            },
+            Anchor {
+                playing: false,
+                ..later(5_000, 15_000)
+            },
+            Anchor {
+                rate: 1.5,
+                ..later(5_000, 15_000)
+            },
+        ] {
+            assert_eq!(follow(current), current, "{current:?}");
+        }
+    }
+
+    #[test]
+    fn anchor_positions() {
+        let anchor = Anchor {
+            generation: 1,
+            playing: true,
+            rate: 2.0,
+            position_ms: 10_000,
+            at_unix_ms: WALL_BASE,
+        };
+        assert_eq!(anchor.position_at(WALL_BASE + 1_000, None), 12_000);
+        // Stops at the end of the song, like the clock.
+        assert_eq!(
+            anchor.position_at(WALL_BASE + 100_000, Some(30_000)),
+            30_000
+        );
+        assert_eq!(anchor.position_at(WALL_BASE + 100_000, Some(0)), 210_000);
+        // A wall clock that went back does not move the song back.
+        assert_eq!(anchor.position_at(WALL_BASE - 5_000, None), 10_000);
+        let paused = Anchor {
+            playing: false,
+            ..anchor
+        };
+        assert_eq!(paused.position_at(WALL_BASE + 5_000, None), 10_000);
+        let backwards = Anchor {
+            rate: -1.0,
+            ..anchor
+        };
+        assert_eq!(backwards.position_at(WALL_BASE + 4_000, None), 6_000);
+        assert_eq!(backwards.position_at(WALL_BASE + 40_000, None), 0);
+        let absurd = Anchor {
+            rate: 1e300,
+            ..anchor
+        };
+        assert_eq!(absurd.position_at(WALL_BASE + 1, None), u64::MAX);
+
+        // At the end of a song both the clock and the anchor stand still,
+        // so a player that goes on past the end publishes nothing.
+        let at_end = Anchor {
+            rate: 1.0,
+            position_ms: 30_000,
+            ..anchor
+        };
+        let current = Anchor {
+            position_ms: 30_000,
+            at_unix_ms: WALL_BASE + 60_000,
+            ..at_end
+        };
+        assert_eq!(Anchor::follow(Some(at_end), current, Some(30_000)), at_end);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_view_shows_how_each_target_is_doing() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.play(song("Song"), 0);
+        let lyrics = FakeLyrics::default().with("Song", 0, synced(&[(0, "One"), (2_200, "Two")]));
+        let (flaky, _) = FakeTarget::scripted(
+            "flaky",
+            0,
+            t0,
+            &[Reply::Unavailable, Reply::Other, Reply::Unavailable],
+        );
+        let (denied, _) = FakeTarget::scripted("denied", 0, t0, &[Reply::Unauthorized]);
+        let (limited, _) = FakeTarget::scripted("limited", 0, t0, &[Reply::RateLimited]);
+        let (fine, _) = FakeTarget::new("fine", 0, t0);
+        let (engine, view) = watched(
+            engine(
+                config(),
+                &source,
+                lyrics,
+                vec![flaky, denied, limited, fine],
+            ),
+            t0,
+        );
+        let run = start(engine, t0);
+
+        let mut targets = Vec::new();
+        for ms in [500, 1_500, 2_500, 3_500] {
+            run.until(ms).await;
+            targets.push(view.current().targets);
+        }
+        source.stop();
+        run.until(4_500).await;
+        targets.push(view.current().targets);
+        run.stop().await;
+
+        let off = target_view(
+            "denied",
+            TargetState::Off,
+            Some("not authorized: token revoked"),
+        );
+        let showing = |id: &str| target_view(id, TargetState::Showing, None);
+        // Flaky: unavailable at 0 s (the startup clear), another error at
+        // 1 s, unavailable again at 2 s, fine at 3 s. Limited: rate limited
+        // at 0 s, fine at 1 s.
+        assert_eq!(
+            targets[0],
+            [
+                target_view("flaky", TargetState::Waiting, Some("not running")),
+                off.clone(),
+                target_view(
+                    "limited",
+                    TargetState::RateLimited,
+                    Some("rate limited, waiting 1 s")
+                ),
+                showing("fine"),
+            ]
+        );
+        assert_eq!(
+            targets[1],
+            [
+                target_view("flaky", TargetState::Retrying, Some("broken pipe")),
+                off.clone(),
+                showing("limited"),
+                showing("fine"),
+            ]
+        );
+        assert_eq!(
+            targets[2][0],
+            target_view("flaky", TargetState::Waiting, Some("not running"))
+        );
+        assert_eq!(
+            targets[3],
+            [
+                showing("flaky"),
+                off.clone(),
+                showing("limited"),
+                showing("fine")
+            ]
+        );
+        // Nothing plays any more: cleared, except the one switched off.
+        let cleared = |id: &str| target_view(id, TargetState::Cleared, None);
+        assert_eq!(
+            targets[4],
+            [cleared("flaky"), off, cleared("limited"), cleared("fine")]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_target_is_starting_until_it_answers() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        let (stuck, _) = FakeTarget::scripted("stuck", 0, t0, &[Reply::Hang]);
+        let (engine, view) = watched(
+            engine(config(), &source, FakeLyrics::default(), vec![stuck]),
+            t0,
+        );
+        let run = start(engine, t0);
+
+        run.until(1_000).await;
+        let starting = view.current();
+        run.until(5_500).await;
+        let timed_out = view.current();
+        run.until(6_500).await;
+        let retried = view.current();
+        run.stop().await;
+
+        assert_eq!(starting.source, "fake");
+        assert_eq!(
+            starting.targets,
+            [target_view("stuck", TargetState::Starting, None)]
+        );
+        assert_eq!(
+            timed_out.targets,
+            [target_view(
+                "stuck",
+                TargetState::Retrying,
+                Some("no answer within 5 s, will try again")
+            )]
+        );
+        // Tried again a second later, and cleared.
+        assert_eq!(
+            retried.targets,
+            [target_view("stuck", TargetState::Cleared, None)]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_view_shows_the_pause_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("paused");
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.play(song("Song"), 0);
+        let lyrics = FakeLyrics::default().with("Song", 0, synced(&[(0, "One")]));
+        let (fast, _) = FakeTarget::new("fast", 0, t0);
+        let (engine, view) = watched(
+            engine(config(), &source, lyrics, vec![fast]).with_pause_marker(marker.clone()),
+            t0,
+        );
+        let run = start(engine, t0);
+
+        run.until(1_000).await;
+        let sharing = view.current();
+        std::fs::write(&marker, b"").unwrap();
+        run.until(2_000).await;
+        let paused = view.current();
+        std::fs::remove_file(&marker).unwrap();
+        run.until(3_000).await;
+        let resumed = view.current();
+        run.stop().await;
+
+        assert!(!sharing.paused);
+        assert_eq!(sharing.status.unwrap().text, "🎵 One");
+        // Paused: the song is still followed, but nothing is shown.
+        assert!(paused.paused);
+        assert_eq!(paused.status, None);
+        assert_eq!(paused.now.unwrap().title, "Song");
+        assert_eq!(
+            paused.targets,
+            [target_view("fast", TargetState::Cleared, None)]
+        );
+        assert!(!resumed.paused);
+        assert_eq!(resumed.status.unwrap().text, "🎵 One");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nothing_playing_means_no_song_in_the_view() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        let (engine, view) = watched(
+            engine(config(), &source, FakeLyrics::default(), Vec::new()),
+            t0,
+        );
+        let run = start(engine, t0);
+
+        run.until(1_050).await;
+        let nothing = view.current();
+        source.play(song("Song"), 0);
+        run.until(2_050).await;
+        let playing = view.current();
+        source.stop();
+        run.until(3_050).await;
+        let stopped = view.current();
+        run.stop().await;
+
+        assert_eq!(nothing.source, "fake");
+        assert_eq!(nothing.now, None);
+        assert_eq!(nothing.status, None);
+        assert_eq!(playing.now.unwrap().title, "Song");
+        assert!(playing.status.is_some());
+        assert_eq!(stopped.now, None);
+        assert_eq!(stopped.status, None);
+    }
+
+    // ---------------------------------------------------------------------
+    // Cover art
+    // ---------------------------------------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn the_cover_is_read_once_per_song() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.with_covers();
+        source.play(song("Song A"), 0);
+        let (engine, view) = watched(
+            engine(config(), &source, FakeLyrics::default(), Vec::new()),
+            t0,
+        );
+        let run = start(engine, t0);
+
+        run.until(1_050).await;
+        let first = view.now();
+        // A seek, a pause and a resume are the same song.
+        source.play(song("Song A"), 60_000);
+        run.until(2_050).await;
+        source.pause();
+        run.until(3_050).await;
+        source.resume();
+        run.until(4_050).await;
+        let reads_for_a = source.cover_reads();
+        source.play(song("Song B"), 0);
+        run.until(5_000).await;
+        let second = view.now();
+        run.stop().await;
+
+        assert_eq!(first.artwork, Some(cover_of("Song A")));
+        assert_eq!(reads_for_a, 1);
+        assert_eq!(second.title, "Song B");
+        assert_eq!(second.artwork, Some(cover_of("Song B")));
+        assert_eq!(source.cover_reads(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_cover_never_holds_up_lines() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.with_covers();
+        source.slow_covers(3_000);
+        source.play(song("Song"), 0);
+        let lyrics =
+            FakeLyrics::default().with("Song", 0, synced(&[(1_000, "One"), (2_000, "Two")]));
+        let (fast, log) = FakeTarget::new("fast", 0, t0);
+        let (engine, view) = watched(engine(config(), &source, lyrics, vec![fast]), t0);
+        let run = start(engine, t0);
+
+        run.until(2_500).await;
+        let waiting = view.now();
+        run.until(3_500).await;
+        let arrived = view.now();
+        run.stop().await;
+
+        assert_calls(
+            &log.calls(),
+            &[
+                (0, Call::Clear),
+                (0, no_lyrics("Song")),
+                (0, intro()),
+                (1_000, line("One")),
+                (2_000, line("Two")),
+                (3_500, Call::Clear),
+            ],
+            2,
+        );
+        assert_eq!(waiting.artwork, None);
+        assert_eq!(arrived.artwork, Some(cover_of("Song")));
+        // Published as soon as it came.
+        assert_eq!(view.times_between(2_001, 3_400), [3_000]);
+        // The song went on while the cover was read: the anchor never moved.
+        assert_eq!(
+            (arrived.position_ms, arrived.position_at_unix_ms),
+            (0, WALL_BASE)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cover_for_an_earlier_song_is_never_shown() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.with_covers();
+        source.slow_covers(2_000);
+        source.play(song("Song A"), 0);
+        let (engine, view) = watched(
+            engine(config(), &source, FakeLyrics::default(), Vec::new()),
+            t0,
+        );
+        let run = start(engine, t0);
+
+        // A's cover would come at 2 s; B starts at 1.5 s.
+        run.until(1_050).await;
+        source.play(song("Song B"), 0);
+        run.until(3_000).await;
+        let waiting = view.now();
+        run.until(4_000).await;
+        let arrived = view.now();
+        run.stop().await;
+
+        assert_eq!(waiting.title, "Song B");
+        assert_eq!(waiting.artwork, None);
+        assert_eq!(arrived.artwork, Some(cover_of("Song B")));
+        assert_eq!(source.cover_reads(), 2);
+        let a_cover = Some(cover_of("Song A"));
+        assert!(
+            view.seen()
+                .iter()
+                .all(|(_, v)| v.now.as_ref().map(|now| &now.artwork) != Some(&a_cover)),
+            "{:?}",
+            view.seen()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cover_read_gives_up_after_5_s_and_errors_mean_no_cover() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.with_covers();
+        source.hang_covers();
+        source.play(song("Song A"), 0);
+        let lyrics = FakeLyrics::default().with("Song A", 0, synced(&[(4_000, "Late")]));
+        let (fast, log) = FakeTarget::new("fast", 0, t0);
+        let (engine, view) = watched(engine(config(), &source, lyrics, vec![fast]), t0);
+        let run = start(engine, t0);
+
+        run.until(4_900).await;
+        let in_flight_before = source.covers_in_flight();
+        run.until(5_100).await;
+        let in_flight_after = source.covers_in_flight();
+        // The next song's cover works again; the one after fails.
+        source.slow_covers(0);
+        source.play(song("Song B"), 0);
+        run.until(5_600).await;
+        let b = view.now();
+        source.fail_covers("no cover for this one");
+        source.play(song("Song C"), 0);
+        run.until(6_600).await;
+        let c = view.now();
+        run.stop().await;
+
+        assert_eq!(in_flight_before, 1);
+        assert_eq!(in_flight_after, 0, "abandoned at 5 s");
+        assert_eq!(log.last_call_until(4_500), Some(line("Late")));
+        assert_eq!(b.artwork, Some(cover_of("Song B")));
+        assert_eq!(c.title, "Song C");
+        assert_eq!(c.artwork, None);
+        assert_eq!(source.cover_reads(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_a_view_the_cover_is_never_read() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.with_covers();
+        source.play(song("Song"), 0);
+        let (fast, log) = FakeTarget::new("fast", 0, t0);
+        let run = start(
+            engine(config(), &source, FakeLyrics::default(), vec![fast]),
+            t0,
+        );
+
+        run.until(2_000).await;
+        run.stop().await;
+
+        assert_eq!(source.cover_reads(), 0);
+        assert_eq!(log.sets(), [(0, "Song · Artist".to_string())]);
+    }
+
+    #[test]
+    fn window_urls() {
+        for url in [
+            "https://i.scdn.co/image/abc",
+            "HTTP://example.com/a.png",
+            "data:image/png;base64,iVBORw0KGgo=",
+        ] {
+            assert!(is_window_url(url), "{url}");
+        }
+        for url in [
+            "",
+            "file:///tmp/a.png",
+            "javascript:alert(1)",
+            "/tmp/a.png",
+            "http",
+            "ftp://example.com/a.png",
+            "♫♫♫♫♫",
+        ] {
+            assert!(!is_window_url(url), "{url}");
+        }
     }
 
     // ---------------------------------------------------------------------

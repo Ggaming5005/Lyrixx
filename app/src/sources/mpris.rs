@@ -5,7 +5,7 @@
 //! - `PlaybackStatus` (`"Playing"`, `"Paused"`, `"Stopped"`)
 //! - `Metadata` (a{sv}): `xesam:title` (s), `xesam:artist` (as), `xesam:album` (s),
 //!   `mpris:length` (x or t, microseconds), `mpris:trackid` (o or s),
-//!   `xesam:url` (s)
+//!   `xesam:url` (s), `mpris:artUrl` (s)
 //! - `Position` (x, microseconds; read live, may be missing or fail for some players)
 //! - `Rate` (d, default 1.0)
 //!
@@ -15,12 +15,18 @@
 //! `org.mpris.MediaPlayer2.playerctld` is skipped: it mirrors another player.
 //! Properties are never cached (players do not announce `Position` changes),
 //! and each player gets 800 ms to answer, so one hung player cannot stall a poll.
+//!
+//! Cover art is the `mpris:artUrl` of the player the last snapshot picked:
+//! `http(s)` URLs as they are, local `file://` images (browsers and most
+//! local players write one) read into a `data:` URL, at most 2 MiB.
 
+use super::artwork::artwork_from_url;
 use super::{choose, is_blocked, sanitize_rate, spotify_track_id, NowPlayingSource};
 use crate::types::{PlaybackSnapshot, PlaybackStatus, Track};
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::PoisonError;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use zbus::proxy::CacheProperties;
@@ -46,6 +52,8 @@ pub struct MprisSource {
     /// Bus address to use instead of the session bus (tests only).
     address: Option<String>,
     connection: Mutex<Option<Connection>>,
+    /// `mpris:artUrl` of the player the last snapshot picked.
+    art_url: std::sync::Mutex<Option<String>>,
 }
 
 impl MprisSource {
@@ -55,6 +63,7 @@ impl MprisSource {
             blocked,
             address: None,
             connection: Mutex::new(None),
+            art_url: std::sync::Mutex::new(None),
         }
     }
 
@@ -113,7 +122,11 @@ impl NowPlayingSource for MprisSource {
     async fn snapshot(&self) -> anyhow::Result<Option<PlaybackSnapshot>> {
         let connection = self.connection().await?;
         match read_players(&connection, &self.blocked).await {
-            Ok(candidates) => Ok(choose(candidates, &self.preferred, &self.blocked)),
+            Ok(players) => {
+                let (picked, art_url) = pick(players, &self.preferred, &self.blocked);
+                *self.art_url.lock().unwrap_or_else(PoisonError::into_inner) = art_url;
+                Ok(picked)
+            }
             Err(err) => {
                 // The connection may be broken: open a new one on the next poll.
                 *self.connection.lock().await = None;
@@ -121,6 +134,44 @@ impl NowPlayingSource for MprisSource {
             }
         }
     }
+
+    async fn artwork(&self) -> anyhow::Result<Option<String>> {
+        let art_url = self
+            .art_url
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        match art_url {
+            Some(url) => artwork_from_url(&url).await,
+            None => Ok(None),
+        }
+    }
+}
+
+/// What one player reported.
+#[derive(Debug, Clone, PartialEq)]
+struct Player {
+    snapshot: PlaybackSnapshot,
+    /// `mpris:artUrl`, when the player gave one.
+    art_url: Option<String>,
+}
+
+/// [`choose`] among the players, with the picked player's art URL. Bus names
+/// are unique, so the app id tells which player was picked.
+fn pick(
+    players: Vec<Player>,
+    preferred: &[String],
+    blocked: &[String],
+) -> (Option<PlaybackSnapshot>, Option<String>) {
+    let snapshots = players.iter().map(|p| p.snapshot.clone()).collect();
+    let picked = choose(snapshots, preferred, blocked);
+    let art_url = picked.as_ref().and_then(|picked| {
+        players
+            .into_iter()
+            .find(|p| p.snapshot.app_id == picked.app_id)
+            .and_then(|p| p.art_url)
+    });
+    (picked, art_url)
 }
 
 /// True for a player's bus name (not playerctld).
@@ -131,10 +182,7 @@ fn is_player_name(name: &str) -> bool {
 /// Reads every player that is not blocked, in bus-name order. Players that fail
 /// or do not answer in time are skipped; only a failure of the bus itself is
 /// an error.
-async fn read_players(
-    connection: &Connection,
-    blocked: &[String],
-) -> anyhow::Result<Vec<PlaybackSnapshot>> {
+async fn read_players(connection: &Connection, blocked: &[String]) -> anyhow::Result<Vec<Player>> {
     let bus = zbus::fdo::DBusProxy::builder(connection)
         .cache_properties(CacheProperties::No)
         .build()
@@ -167,7 +215,7 @@ async fn read_players(
     let mut found = Vec::new();
     while let Some(joined) = reads.join_next().await {
         match joined {
-            Ok((index, _, Ok(Ok(snapshot)))) => found.push((index, snapshot)),
+            Ok((index, _, Ok(Ok(player)))) => found.push((index, player)),
             Ok((_, name, Ok(Err(err)))) => {
                 tracing::debug!(player = %name, "skipping MPRIS player: {err:#}");
             }
@@ -178,12 +226,12 @@ async fn read_players(
         }
     }
     found.sort_by_key(|(index, _)| *index);
-    Ok(found.into_iter().map(|(_, snapshot)| snapshot).collect())
+    Ok(found.into_iter().map(|(_, player)| player).collect())
 }
 
 /// Reads one player. `PlaybackStatus` must be readable; a missing `Metadata`
 /// counts as empty, a missing `Position` as 0 and a missing `Rate` as 1.0.
-async fn read_player(connection: &Connection, name: &str) -> anyhow::Result<PlaybackSnapshot> {
+async fn read_player(connection: &Connection, name: &str) -> anyhow::Result<Player> {
     let proxy: zbus::Proxy<'_> = zbus::proxy::Builder::new(connection)
         .destination(name)?
         .path(PLAYER_PATH)?
@@ -216,7 +264,7 @@ async fn read_player(connection: &Connection, name: &str) -> anyhow::Result<Play
         .map(micros_to_ms)
         .unwrap_or(0);
 
-    Ok(PlaybackSnapshot {
+    let snapshot = PlaybackSnapshot {
         track: track_from_metadata(&metadata),
         status: status_from_str(&status),
         position_ms,
@@ -224,6 +272,10 @@ async fn read_player(connection: &Connection, name: &str) -> anyhow::Result<Play
         position_at: before + after.saturating_duration_since(before) / 2,
         rate,
         app_id: name.to_string(),
+    };
+    Ok(Player {
+        snapshot,
+        art_url: art_url_from_metadata(&metadata),
     })
 }
 
@@ -284,6 +336,12 @@ fn track_from_metadata(metadata: &HashMap<String, OwnedValue>) -> Track {
         duration_ms,
         spotify_id,
     }
+}
+
+/// `mpris:artUrl` without surrounding spaces; missing, blank or not a string → `None`.
+fn art_url_from_metadata(metadata: &HashMap<String, OwnedValue>) -> Option<String> {
+    let url = text(metadata.get("mpris:artUrl")?)?.trim();
+    (!url.is_empty()).then(|| url.to_string())
 }
 
 /// The value inside any number of variant wrappers.
@@ -492,6 +550,10 @@ mod tests {
                 spotify_id: Some(ID.into()),
             }
         );
+        assert_eq!(
+            art_url_from_metadata(&metadata).as_deref(),
+            Some("https://i.scdn.co/image/abc")
+        );
     }
 
     #[test]
@@ -662,8 +724,103 @@ mod tests {
             ("xesam:album", string_list(&["not", "a", "string"])),
             ("mpris:trackid", OwnedValue::from(1_u8)),
             ("xesam:url", OwnedValue::from(2.5_f64)),
+            ("mpris:artUrl", OwnedValue::from(3_i32)),
         ]);
         assert_eq!(track_from_metadata(&metadata), Track::default());
+        assert_eq!(art_url_from_metadata(&metadata), None);
+    }
+
+    // ---- cover art -------------------------------------------------------------
+
+    #[test]
+    fn art_url_from_metadata_values() {
+        let art = |value: OwnedValue| art_url_from_metadata(&map(vec![("mpris:artUrl", value)]));
+        assert_eq!(
+            art(string("https://i.scdn.co/image/ab67616d0000b273")).as_deref(),
+            Some("https://i.scdn.co/image/ab67616d0000b273")
+        );
+        assert_eq!(
+            art(string(" file:///tmp/.org.chromium.Chromium.abc \n")).as_deref(),
+            Some("file:///tmp/.org.chromium.Chromium.abc")
+        );
+        assert_eq!(
+            art(ov(Value::new(Value::new("file:///a.png")))).as_deref(),
+            Some("file:///a.png")
+        );
+        assert_eq!(art(string("")), None);
+        assert_eq!(art(string("   ")), None);
+        assert_eq!(art(string_list(&["https://a/b.png"])), None);
+        assert_eq!(art_url_from_metadata(&HashMap::new()), None);
+    }
+
+    fn player(app_id: &str, status: PlaybackStatus, art_url: Option<&str>) -> Player {
+        Player {
+            snapshot: PlaybackSnapshot {
+                track: Track {
+                    title: format!("{app_id} song"),
+                    ..Track::default()
+                },
+                status,
+                position_ms: 0,
+                position_at: Instant::now(),
+                rate: 1.0,
+                app_id: app_id.to_string(),
+            },
+            art_url: art_url.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn pick_takes_the_art_url_of_the_picked_player() {
+        let players = vec![
+            player(
+                "org.mpris.MediaPlayer2.aaa",
+                PlaybackStatus::Paused,
+                Some("https://a"),
+            ),
+            player(
+                "org.mpris.MediaPlayer2.vlc",
+                PlaybackStatus::Playing,
+                Some("file:///v"),
+            ),
+            player("org.mpris.MediaPlayer2.zzz", PlaybackStatus::Playing, None),
+        ];
+        let (picked, art) = pick(players.clone(), &[], &[]);
+        assert_eq!(picked.unwrap().app_id, "org.mpris.MediaPlayer2.vlc");
+        assert_eq!(art.as_deref(), Some("file:///v"));
+
+        // The preferred player has no art: none, not another player's.
+        let (picked, art) = pick(players.clone(), &["zzz".to_string()], &[]);
+        assert_eq!(picked.unwrap().app_id, "org.mpris.MediaPlayer2.zzz");
+        assert_eq!(art, None);
+
+        let blocked = ["vlc".to_string(), "zzz".to_string()];
+        let (picked, art) = pick(players, &[], &blocked);
+        assert_eq!(picked.unwrap().app_id, "org.mpris.MediaPlayer2.aaa");
+        assert_eq!(art.as_deref(), Some("https://a"));
+
+        let stopped = vec![player(
+            "org.mpris.MediaPlayer2.vlc",
+            PlaybackStatus::Stopped,
+            Some("https://s"),
+        )];
+        assert_eq!(pick(stopped, &[], &[]), (None, None));
+        assert_eq!(pick(Vec::new(), &[], &[]), (None, None));
+    }
+
+    #[tokio::test]
+    async fn artwork_follows_the_last_pick() {
+        let source = MprisSource::new(vec![], vec![]);
+        assert_eq!(source.artwork().await.unwrap(), None, "no snapshot yet");
+        *source.art_url.lock().unwrap() = Some("https://i.scdn.co/image/abc".into());
+        assert_eq!(
+            source.artwork().await.unwrap().as_deref(),
+            Some("https://i.scdn.co/image/abc")
+        );
+        *source.art_url.lock().unwrap() = Some("file:///definitely/not/here.png".into());
+        assert!(source.artwork().await.is_err());
+        *source.art_url.lock().unwrap() = Some("spotify:image:abc".into());
+        assert_eq!(source.artwork().await.unwrap(), None);
     }
 
     // ---- number helpers --------------------------------------------------------
@@ -802,6 +959,7 @@ mod bus_tests {
         position_us: i64,
         started: Instant,
         hang: bool,
+        art_url: Option<String>,
     }
 
     impl FakePlayer {
@@ -815,6 +973,7 @@ mod bus_tests {
                 position_us: 0,
                 started: Instant::now(),
                 hang: false,
+                art_url: None,
             }
         }
     }
@@ -841,6 +1000,12 @@ mod bus_tests {
                 OwnedValue::try_from(Value::from(self.artists.clone())).unwrap(),
             );
             metadata.insert("mpris:length".to_string(), OwnedValue::from(self.length_us));
+            if let Some(url) = &self.art_url {
+                metadata.insert(
+                    "mpris:artUrl".to_string(),
+                    OwnedValue::from(zbus::zvariant::Str::from(url.clone())),
+                );
+            }
             metadata.insert(
                 "mpris:trackid".to_string(),
                 OwnedValue::from(
@@ -885,15 +1050,20 @@ mod bus_tests {
         spotify.length_us = 215_000_000;
         spotify.trackid = "/com/spotify/track/4uLU6hMCjMI75M1A2tKUQC";
         spotify.position_us = 61_500_000;
+        spotify.art_url = Some("https://i.scdn.co/image/ab67616d0000b273".into());
         let _spotify = serve(&bus.address, "org.mpris.MediaPlayer2.spotify", spotify).await;
 
-        // Sorts first, but paused: the playing player wins.
-        let _paused = serve(
-            &bus.address,
-            "org.mpris.MediaPlayer2.aaa",
-            FakePlayer::new("Paused", "Paused Song"),
-        )
-        .await;
+        // Sorts first, but paused: the playing player wins. Its cover is a
+        // local file, like browsers and local players write.
+        let art_dir = tempfile::tempdir().unwrap();
+        let cover = art_dir.path().join("cover art.png");
+        std::fs::write(&cover, b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR").unwrap();
+        let mut paused = FakePlayer::new("Paused", "Paused Song");
+        paused.art_url = Some(format!(
+            "file://{}",
+            cover.to_str().unwrap().replace(' ', "%20")
+        ));
+        let _paused = serve(&bus.address, "org.mpris.MediaPlayer2.aaa", paused).await;
         // playerctld mirrors another player and must be ignored, even when preferred.
         let _playerctld = serve(
             &bus.address,
@@ -939,6 +1109,11 @@ mod bus_tests {
         assert!(first.position_ms >= 61_500, "{}", first.position_ms);
         assert!(first.position_ms < 61_500 + 5_000, "{}", first.position_ms);
         assert_eq!(first.rate, 1.0);
+        // The picked player's cover, a web URL handed over as it is.
+        assert_eq!(
+            source.artwork().await.unwrap().as_deref(),
+            Some("https://i.scdn.co/image/ab67616d0000b273")
+        );
 
         // The position is read live every time (no stale cached value).
         tokio::time::sleep(Duration::from_millis(400)).await;
@@ -954,6 +1129,11 @@ mod bus_tests {
         assert_eq!(picked.app_id, "org.mpris.MediaPlayer2.aaa");
         assert_eq!(picked.status, PlaybackStatus::Paused);
         assert_eq!(picked.track.title, "Paused Song");
+        // Its local cover is read into a data: URL.
+        assert_eq!(
+            blocked.artwork().await.unwrap().as_deref(),
+            Some("data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==")
+        );
 
         // A stopped player alone means nothing is playing.
         let stopped_bus = start_bus();
@@ -965,6 +1145,7 @@ mod bus_tests {
         .await;
         let source = MprisSource::with_address(&stopped_bus.address, vec![], vec![]);
         assert_eq!(source.snapshot().await.unwrap(), None);
+        assert_eq!(source.artwork().await.unwrap(), None);
 
         // When the bus goes away the source reports an error and drops the connection,
         // so the next poll opens a new one.
