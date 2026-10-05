@@ -1,6 +1,13 @@
+[workspace]
+members = [".", "desktop"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+
 [package]
 name = "lyrix"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 rust-version = "1.80"
 description = "Turns whatever you're listening to into a live status, with synced lyrics."
@@ -41,6 +48,8 @@ windows-future = "0.3"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
 
+# Shared by the CLI and the desktop app (a workspace's profiles live here).
+# Tauri's own size guide recommends these settings, `panic = "abort"` included.
 [profile.release]
 opt-level = "s"
 lto = true

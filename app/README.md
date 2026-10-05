@@ -21,11 +21,19 @@ In Discord, your profile and the member list show **Listening to 🎵 We're no s
 
 ## Getting started
 
-Download the `lyrix` binary for your system from the latest CI run (the **Artifacts** section), or build it:
+### The app
+
+Download the installer for your system from the latest [release](https://github.com/Ggaming5005/Lyrixx/releases), or from the latest CI run (the **Artifacts** section): **Lyrix-Windows** (setup `.exe`), **Lyrix-macOS** (`.dmg`) or **Lyrix-Linux** (`.AppImage` and `.deb`).
+
+Lyrix opens its window and lives in the tray (the menu bar on macOS). Closing the window keeps it running; **Quit Lyrix** in the tray menu clears your status and stops it. It can start at login, in the tray only. The app and the `lyrix` command share their settings, so either one can change them; run one of them at a time, since both would set the same status.
+
+### The command
+
+Download the `lyrix` binary for your system from the latest CI run (**lyrix-cli-…** under **Artifacts**), or build it:
 
 ```sh
 cd app
-cargo build --release      # the binary is target/release/lyrix
+cargo build --release -p lyrix      # the binary is target/release/lyrix
 ```
 
 Then:
@@ -88,14 +96,18 @@ The `[advanced]` section has switches for options that use your own account in w
 
 ## Development
 
+`app` is a Cargo workspace: the `lyrix` library and command at its root, and the desktop app (Tauri 2) in `desktop`, whose window (`desktop/ui`, plain HTML, CSS and JavaScript) talks to Rust only as `desktop/CONTRACT.md` describes. On Linux the app needs the WebKitGTK 4.1, Ayatana AppIndicator, librsvg and xdo development packages.
+
 ```sh
 cd app
-cargo test                 # unit tests
-cargo clippy --all-targets -- -D warnings
-cargo test --lib sources:: -- --ignored   # Linux: MPRIS tests against a private D-Bus
-cargo test --test e2e_linux -- --nocapture   # Linux: the real binary end to end (needs dbus-daemon, else skipped)
+cargo test --workspace     # unit tests
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test -p lyrix --lib sources:: -- --ignored   # Linux: MPRIS tests against a private D-Bus
+cargo test -p lyrix --test e2e_linux -- --nocapture   # Linux: the real binary end to end (needs dbus-daemon, else skipped)
+cargo run -p lyrix-desktop # the app, with its log on stderr too
+cd desktop && npx --yes @tauri-apps/cli@2 build   # installers, in target/release/bundle
 ```
 
 The end-to-end test (also part of `cargo test` on Linux) runs `lyrix now`, `lyrix run` and `lyrix lyrics` against a private D-Bus with a fake MPRIS player, a mock LRCLIB server and a fake Discord IPC socket, all local.
 
-CI runs format, lint, tests and a release build on Windows, macOS and Linux, and uploads each binary.
+CI runs format, lint and tests on Windows, macOS and Linux, then builds and uploads the installers and the `lyrix` command. Pushing a `v*` tag builds the installers into a draft GitHub release.

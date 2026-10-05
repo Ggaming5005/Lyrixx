@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Lyrix",
+  "identifier": "io.github.ggaming5005.lyrix",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' https: http: data:",
+        "font-src": "'self'",
+        "connect-src": "ipc: http://ipc.localhost",
+        "media-src": "'none'",
+        "object-src": "'none'",
+        "frame-src": "'none'",
+        "worker-src": "'none'",
+        "base-uri": "'none'",
+        "form-action": "'none'"
+      },
+      "dangerousDisableAssetCspModification": ["style-src"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "dmg", "app", "deb", "appimage"],
+    "publisher": "Ggaming5005",
+    "homepage": "https://github.com/Ggaming5005/Lyrixx",
+    "copyright": "Copyright © Ggaming5005",
+    "license": "MIT",
+    "category": "Music",
+    "shortDescription": "Shows the lyric line you're hearing as your Discord status.",
+    "longDescription": "Lyrix reads what your music player is playing from the operating system, finds synced lyrics, and shows the line you're hearing right now as your Discord status. It runs on your own computer: no server, no shared login, no audio recording.",
+    "icon": [
+      "icons/128x128.png",
+      "icons/32x32.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
