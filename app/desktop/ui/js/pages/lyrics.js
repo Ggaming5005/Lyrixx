@@ -42,7 +42,7 @@ export function createLyricsPage({ root, api, model }) {
   const yourFiles = row({
     lead: stepNumber(1),
     title: 'Your files',
-    desc: 'Your own .lrc and .txt files come first, so you can add or fix any song.',
+    desc: 'Your own .lrc files come first, so you can add or fix any song. A .txt is used when no synced lyrics are found.',
     below: h(
       'div',
       { class: 'path-box' },
@@ -112,7 +112,7 @@ export function createLyricsPage({ root, api, model }) {
         {
           title: 'Saved lyrics',
           icon: 'database',
-          note: 'Your own files always come first, even for songs Lyrix already saved.',
+          note: 'Your own .lrc files always come first, even for songs Lyrix already saved.',
         },
         row({
           lead: 'database',
@@ -141,7 +141,7 @@ export function createLyricsPage({ root, api, model }) {
           fileRow(
             'file',
             ['{Artist}', ' - ', '{Title}', '.txt'],
-            'Plain lyrics: Lyrix spreads them over the song and marks the timing as estimated.',
+            'Plain lyrics, used when no synced lyrics are found. Lyrix spreads them over the song and marks the timing as estimated.',
           ),
           fileRow('file', ['{Title}', '.lrc'], 'Works too, when the title is enough to tell songs apart.'),
           sample,
