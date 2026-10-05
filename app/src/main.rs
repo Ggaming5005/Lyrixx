@@ -2348,7 +2348,9 @@ mod tests {
             ".a1b2.json.123-0.tmp",
             "json",
             "x.json.bak",
-            "x.JSON",
+            // Distinct stem: on case-insensitive filesystems (macOS,
+            // Windows) "x.JSON" would be the same file as "x.json".
+            "y.JSON",
         ] {
             std::fs::write(cache.join(name), "keep").unwrap();
         }
@@ -2370,8 +2372,8 @@ mod tests {
                 "notes.txt",
                 "song.lrc",
                 "sub",
-                "x.JSON",
                 "x.json.bak",
+                "y.JSON",
             ]
         );
         assert!(cache.join("sub").join("nested.json").exists());
