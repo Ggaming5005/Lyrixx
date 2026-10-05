@@ -75,7 +75,7 @@ flowchart LR
 
 ## Your own lyrics
 
-Put `.lrc` (timed) or `.txt` (plain) files in the lyrics folder. **Lyrics → Open folder** in the app takes you there. Name them `Artist - Title.lrc`; letter case, accents, punctuation and extras like "(Remastered)" don't matter. Your files always come first.
+Put `.lrc` (timed) or `.txt` (plain) files in the lyrics folder. **Lyrics → Open folder** in the app takes you there. Name them `Artist - Title.lrc`; letter case, accents, punctuation and extras like "(Remastered)" don't matter. Your `.lrc` files always come first, even for songs Lyrix found before; a `.txt` is used when no timed lyrics are found.
 
 ```
 [00:12.40] We folded maps into paper planes

@@ -18,7 +18,7 @@ This page covers the `lyrix` command, every setting and development. For the app
    - Windows: the system media sessions (Spotify, Apple Music, Tidal, Deezer, browsers and more).
    - Linux: MPRIS, which nearly every player and browser supports.
    - macOS: Spotify and Apple Music directly. Install [mediaremote-adapter](https://github.com/ungive/mediaremote-adapter) and set `sources.macos_adapter_dir` to cover every app in the Now Playing widget.
-2. **Lyrics.** Lyrix looks in this order: your own `.lrc` and `.txt` files, lyrics it found before (cache), then [LRCLIB](https://lrclib.net), a free open lyrics database. Your files are never cached, so a file you add wins even for a song looked up before. Lyrics without timing are spread across the song and marked as estimated. When nothing is found, the status names the song instead.
+2. **Lyrics.** Lyrix looks in this order: your own `.lrc` and `.txt` files, lyrics it found before (cache), then [LRCLIB](https://lrclib.net), a free open lyrics database. Your files are never cached, so an `.lrc` you add wins even for a song looked up before; a plain `.txt` is used only when no synced lyrics are found. Lyrics without timing are spread across the song and marked as estimated. When nothing is found, the status names the song instead.
 3. **Your status.** Lyrix keeps its own clock between readings, picks the line for the current moment, and sends it to each target no faster than that target allows.
 
 ## Getting started
