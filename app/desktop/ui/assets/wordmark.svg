@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 392 140" width="392" height="140">
+  <title>Lyrix</title>
+  <style>
+    .letters { stroke: #17141f; }
+    .dot { fill: #17141f; }
+    @media (prefers-color-scheme: dark) {
+      .letters { stroke: #ffffff; }
+      .dot { fill: #ffffff; }
+    }
+  </style>
+  <defs>
+    <linearGradient id="lyrix-wordmark-bg" x1="0.12" y1="0" x2="0.88" y2="1">
+      <stop offset="0" stop-color="#FF9A4D"/>
+      <stop offset="0.48" stop-color="#F43F7A"/>
+      <stop offset="1" stop-color="#7448FF"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="4" width="112" height="112" rx="26" fill="url(#lyrix-wordmark-bg)"/>
+  <!-- The app icon's glyph: a music note whose flag is three lines of lyrics. -->
+  <g transform="translate(-8 -4) scale(0.125)">
+    <path d="M440 296V650M440 296H740M562 416H722M562 536H652" fill="none" stroke="#fff" stroke-width="76" stroke-linecap="round"/>
+    <ellipse cx="364" cy="668" rx="112" ry="90" transform="rotate(-20 364 668)" fill="#fff"/>
+  </g>
+  <g class="letters" transform="translate(140 12)" fill="none" stroke-width="15" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7.5 7.5V92.5H50"/>
+    <path d="M68 35.5 91 92M114 35.5 79.6 120"/>
+    <path d="M136 92.5V35.5M136 61C136 44 146 35.5 164 35.5"/>
+    <path d="M186 92.5V35.5"/>
+    <path d="M206 35.5 242 92.5M242 35.5 206 92.5"/>
+    <circle class="dot" cx="186" cy="11" r="9.5" stroke="none"/>
+  </g>
+</svg>

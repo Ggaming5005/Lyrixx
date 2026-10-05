@@ -1,0 +1,849 @@
+/* Now Playing: cover, track, progress, karaoke lyrics and the live status strip. */
+
+.page-now {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: var(--sp-5);
+  overflow: hidden;
+  padding-bottom: var(--sp-6);
+}
+
+.now-hero {
+  display: grid;
+  grid-template-columns: minmax(200px, 268px) minmax(0, 1fr);
+  gap: var(--sp-12);
+  min-height: 0;
+}
+
+/* ---------------------------------------------------------------------------
+   Left column: cover, title, artist, progress, timing
+   --------------------------------------------------------------------------- */
+
+.now-side {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+}
+
+.cover {
+  position: relative;
+  /* Leaves room for the song, progress and timing below in short windows. */
+  width: max(112px, min(100%, calc(100vh - 420px - var(--titlebar-h))));
+  aspect-ratio: 1 / 1;
+  flex: none;
+  overflow: hidden;
+  border-radius: var(--r-lg);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-art);
+  transition:
+    transform var(--dur-slow) var(--ease-out),
+    box-shadow var(--dur-slow) var(--ease-out);
+}
+
+.cover::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.08);
+  pointer-events: none;
+}
+
+.cover-img,
+.cover-generated {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: opacity 500ms ease;
+}
+
+.cover-generated {
+  display: grid;
+  place-items: center;
+  color: rgb(255 255 255 / 0.9);
+}
+
+.cover-generated svg {
+  width: 34%;
+  height: 34%;
+  filter: drop-shadow(0 6px 16px rgb(0 0 0 / 0.25));
+}
+
+.page-now[data-playing="false"] .cover {
+  transform: scale(0.94);
+  box-shadow: 0 16px 32px -20px rgb(0 0 0 / 0.5);
+}
+
+.track {
+  margin-top: var(--sp-6);
+  min-width: 0;
+}
+
+.track-title {
+  display: -webkit-box;
+  overflow: hidden;
+  font-family: var(--font-display);
+  font-size: var(--fs-title);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.track-artist {
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: var(--fs-body-lg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.track-album {
+  margin-top: 1px;
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: var(--fs-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.track-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: var(--sp-3);
+}
+
+.progress {
+  margin-top: var(--sp-5);
+}
+
+.progress-track {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--surface-press);
+}
+
+.progress-fill {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--text);
+  transform: scaleX(0);
+  transform-origin: left center;
+}
+
+.progress-times {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  color: var(--text-3);
+  font-size: var(--fs-caption);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.timing {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-top: var(--sp-5);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--hairline);
+}
+
+.timing-text {
+  min-width: 0;
+}
+
+.timing-label {
+  font-size: var(--fs-small);
+  font-weight: 600;
+}
+
+.timing-hint {
+  color: var(--text-3);
+  font-size: var(--fs-caption);
+}
+
+.timing-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.timing .stepper-value {
+  min-width: 64px;
+}
+
+.timing-reset {
+  width: 28px;
+  height: 28px;
+}
+
+.timing-reset svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ---------------------------------------------------------------------------
+   Right column: lyrics
+   --------------------------------------------------------------------------- */
+
+.now-lyrics {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.lyrics-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 24px;
+  color: var(--text-3);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+}
+
+.lyrics-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lyrics-source svg {
+  width: 14px;
+  height: 14px;
+}
+
+.lyrics-viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, transparent 9%, #000 32%, #000 66%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, transparent 9%, #000 32%, #000 66%, transparent 100%);
+}
+
+.lyrics-track {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  padding-right: var(--sp-4);
+  transition: transform var(--dur-slow) var(--ease-out);
+  will-change: transform;
+}
+
+.lyrics-viewport.is-browsing .lyrics-track {
+  transition-duration: 120ms;
+}
+
+.lyric {
+  --o: 0.2;
+  --s: 0.8;
+  --b: 0px;
+  margin: 0;
+  padding: 7px 0;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: var(--fs-lyric);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.22;
+  opacity: var(--o);
+  filter: blur(var(--b));
+  transform: scale(var(--s));
+  transform-origin: 0 50%;
+  transition:
+    opacity var(--dur-slow) var(--ease),
+    transform var(--dur-slow) var(--ease-out),
+    filter var(--dur-slow) var(--ease),
+    text-shadow var(--dur-slow) var(--ease);
+  overflow-wrap: anywhere;
+}
+
+.lyric.is-current {
+  text-shadow: 0 0 22px hsl(var(--accent-h) var(--accent-s) 70% / 0.22);
+}
+
+.lyrics-viewport.is-browsing .lyric {
+  --b: 0px;
+}
+
+:root[data-theme="light"] .lyric.is-current {
+  text-shadow: none;
+}
+
+.page-now[data-playing="false"] .lyric.is-current {
+  opacity: 0.75;
+}
+
+/* Intro and instrumental breaks: three beats that breathe while current. */
+
+.lyric-break {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 52px;
+  padding: 0 0 0 2px;
+}
+
+.lyric-break .beat {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--text);
+  opacity: 0.35;
+  transform: scale(0.7);
+  transition:
+    opacity var(--dur-slow) var(--ease),
+    transform var(--dur-slow) var(--ease);
+}
+
+.lyric-break.is-current .beat {
+  opacity: 1;
+  animation: beat 1.6s var(--ease) infinite;
+}
+
+.lyric-break.is-current .beat:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.lyric-break.is-current .beat:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+.page-now[data-playing="false"] .lyric-break .beat {
+  animation-play-state: paused;
+}
+
+@keyframes beat {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.75);
+  }
+
+  40% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+}
+
+/* States inside the lyrics column */
+
+.lyrics-state {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--sp-3);
+  min-height: 0;
+  padding-bottom: var(--sp-10);
+}
+
+.lyrics-state-icon {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  place-items: center;
+  margin-bottom: var(--sp-2);
+  border-radius: var(--r-xl);
+  background: var(--surface-strong);
+  color: var(--text-2);
+}
+
+.lyrics-state-icon svg {
+  width: 26px;
+  height: 26px;
+}
+
+.lyrics-state-title {
+  font-family: var(--font-display);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.lyrics-state-text {
+  max-width: 420px;
+  color: var(--text-2);
+  font-size: var(--fs-body-lg);
+}
+
+.lyrics-state-text q {
+  color: var(--text);
+  font-weight: 600;
+  quotes: "\201C" "\201D";
+}
+
+.lyrics-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+}
+
+.lyrics-state-hint {
+  color: var(--text-3);
+  font-size: var(--fs-caption);
+}
+
+.lyrics-state-hint code {
+  padding: 2px 6px;
+  border-radius: var(--r-sm);
+  background: var(--surface-strong);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+}
+
+/* Searching: shimmering placeholder lines where the lyrics will be */
+
+.lyrics-state--searching {
+  justify-content: flex-start;
+  padding-top: 18%;
+}
+
+.shimmer {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  width: 100%;
+}
+
+.shimmer-line {
+  height: 26px;
+  border-radius: 8px;
+  background:
+    linear-gradient(
+      100deg,
+      transparent 20%,
+      rgb(255 255 255 / 0.16) 45%,
+      transparent 70%
+    )
+    0 0 / 300% 100%,
+    var(--surface-strong);
+  animation: shimmer 1.8s linear infinite;
+}
+
+:root[data-theme="light"] .shimmer-line {
+  background:
+    linear-gradient(100deg, transparent 20%, rgb(255 255 255 / 0.8) 45%, transparent 70%) 0 0 / 300% 100%,
+    rgb(23 20 31 / 0.07);
+  background-size: 300% 100%, auto;
+}
+
+.shimmer-line:nth-child(1) {
+  width: 72%;
+  height: 34px;
+}
+
+.shimmer-line:nth-child(2) {
+  width: 88%;
+  opacity: 0.8;
+}
+
+.shimmer-line:nth-child(3) {
+  width: 64%;
+  opacity: 0.6;
+}
+
+.shimmer-line:nth-child(4) {
+  width: 80%;
+  opacity: 0.42;
+}
+
+.shimmer-line:nth-child(5) {
+  width: 56%;
+  opacity: 0.28;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 100% 0, 0 0;
+  }
+
+  to {
+    background-position: -50% 0, 0 0;
+  }
+}
+
+.lyrics-searching {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lyrics-searching svg {
+  width: 14px;
+  height: 14px;
+  animation: searching 1.6s var(--ease) infinite;
+}
+
+@keyframes searching {
+  50% {
+    transform: translateX(3px) rotate(-8deg);
+  }
+}
+
+/* Instrumental: a small equalizer */
+
+.eq {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 56px;
+  margin-bottom: var(--sp-2);
+}
+
+.eq span {
+  width: 8px;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--accent);
+  transform-origin: bottom;
+  animation: eq 1.2s var(--ease) infinite alternate;
+  transition: background-color 600ms ease;
+}
+
+.eq span:nth-child(1) {
+  animation-duration: 0.9s;
+}
+
+.eq span:nth-child(2) {
+  animation-duration: 1.3s;
+  animation-delay: -0.4s;
+}
+
+.eq span:nth-child(3) {
+  animation-duration: 1.05s;
+  animation-delay: -0.8s;
+}
+
+.eq span:nth-child(4) {
+  animation-duration: 1.4s;
+  animation-delay: -0.2s;
+}
+
+.eq span:nth-child(5) {
+  animation-duration: 0.95s;
+  animation-delay: -0.6s;
+}
+
+.page-now[data-playing="false"] .eq span {
+  animation-play-state: paused;
+}
+
+@keyframes eq {
+  from {
+    transform: scaleY(0.18);
+  }
+
+  to {
+    transform: scaleY(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .eq span {
+    transform: scaleY(0.6);
+  }
+
+  .eq span:nth-child(2n) {
+    transform: scaleY(0.9);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Whole-hero states: nothing playing, engine stopped
+   --------------------------------------------------------------------------- */
+
+.now-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  min-height: 0;
+  padding: 0 var(--sp-6) var(--sp-8);
+  text-align: center;
+}
+
+.empty-art {
+  position: relative;
+  display: grid;
+  width: 152px;
+  height: 152px;
+  place-items: center;
+  margin-bottom: var(--sp-5);
+}
+
+.empty-art .ring {
+  position: absolute;
+  inset: 0;
+  border: 1.5px solid var(--border);
+  border-radius: 50%;
+  animation: ring 4.8s var(--ease) infinite;
+}
+
+.empty-art .ring:nth-child(2) {
+  animation-delay: 1.6s;
+}
+
+.empty-art .ring:nth-child(3) {
+  animation-delay: 3.2s;
+}
+
+@keyframes ring {
+  from {
+    opacity: 0.9;
+    transform: scale(0.55);
+  }
+
+  to {
+    opacity: 0;
+    transform: scale(1.15);
+  }
+}
+
+.empty-logo {
+  position: relative;
+  width: 76px;
+  height: 76px;
+  filter: drop-shadow(0 14px 28px rgb(116 72 255 / 0.35));
+}
+
+.empty-icon {
+  position: relative;
+  display: grid;
+  width: 72px;
+  height: 72px;
+  place-items: center;
+  border-radius: 24px;
+  background: var(--danger-surface);
+  color: var(--danger);
+}
+
+.empty-icon svg {
+  width: 32px;
+  height: 32px;
+}
+
+.empty-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-page);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.empty-text {
+  max-width: 440px;
+  color: var(--text-2);
+  font-size: var(--fs-body-lg);
+}
+
+.empty-apps {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+.empty-error {
+  max-width: 480px;
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--r-md);
+  background: var(--danger-surface);
+  color: var(--danger-text);
+  font-size: var(--fs-small);
+  font-weight: 500;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.empty-actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+
+/* ---------------------------------------------------------------------------
+   Live status strip
+   --------------------------------------------------------------------------- */
+
+.live {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+  padding: var(--sp-3) var(--sp-4) var(--sp-3) var(--sp-3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  -webkit-backdrop-filter: blur(24px) saturate(1.3);
+  backdrop-filter: blur(24px) saturate(1.3);
+}
+
+.live-icon {
+  position: relative;
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex: none;
+  place-items: center;
+  border-radius: var(--r-md);
+  background: var(--surface-strong);
+  color: var(--text);
+}
+
+.live-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.live-icon .dot {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 12px;
+  height: 12px;
+  box-shadow: 0 0 0 3px var(--bg);
+}
+
+.live-icon .dot[data-tone="ok"] {
+  animation: live-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+  50% {
+    box-shadow:
+      0 0 0 3px var(--bg),
+      0 0 0 7px color-mix(in srgb, var(--ok) 25%, transparent);
+  }
+}
+
+.live-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.live-label {
+  color: var(--text-3);
+  font-size: var(--fs-overline);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.live-text {
+  overflow: hidden;
+  font-size: var(--fs-body-lg);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-text.is-muted {
+  color: var(--text-2);
+  font-weight: 500;
+}
+
+.live-side {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex: none;
+}
+
+.live-state {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-2);
+  font-size: var(--fs-small);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+   Smaller windows
+   --------------------------------------------------------------------------- */
+
+@media (max-width: 980px) {
+  .now-hero {
+    grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+    gap: var(--sp-8);
+  }
+
+  .timing {
+    flex-wrap: wrap;
+    row-gap: var(--sp-2);
+  }
+
+  .timing-hint {
+    display: none;
+  }
+
+  :root {
+    --fs-lyric: 26px;
+  }
+}
+
+@media (max-width: 700px) {
+  .page-now {
+    overflow-y: auto;
+  }
+
+  .now-hero {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(320px, 1fr);
+  }
+
+  .now-side {
+    display: grid;
+    grid-template-columns: 112px minmax(0, 1fr);
+    gap: 0 var(--sp-4);
+    align-items: center;
+  }
+
+  .cover {
+    width: 112px;
+    grid-row: span 2;
+  }
+
+  .track {
+    margin-top: 0;
+  }
+
+  .progress,
+  .timing {
+    grid-column: 1 / -1;
+  }
+
+  .live-side .live-state span:last-child {
+    display: none;
+  }
+}
+
+@media (max-height: 560px) {
+  .timing-hint {
+    display: none;
+  }
+}
