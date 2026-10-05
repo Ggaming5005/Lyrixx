@@ -3,12 +3,14 @@
 Lyrix shows the lyric line you're hearing right now as your status. It runs on your own computer, reads what's playing from the operating system, and finds synced lyrics on its own. No server, no shared login, no audio recording.
 
 ```
-▶ Never Gonna Give You Up — Rick Astley
-♫ 🎵 We're no strangers to love
-♫ 🎵 You know the rules and so do I
+▶ Paper Satellites — Juniper & The Lowlights
+♫ 🎵 We folded maps into paper planes
+♫ 🎵 And threw them out of the seventh floor
 ```
 
-In Discord, your profile and the member list show **Listening to 🎵 We're no strangers to love**, with a progress bar for the song.
+In Discord, your profile and the member list show **Listening to Lyrix** with **🎵 We folded maps into paper planes** under it, and a progress bar for the song.
+
+This page covers the `lyrix` command, every setting and development. For the app, downloads and troubleshooting, see the [main README](../README.md).
 
 ## How it works
 
@@ -16,7 +18,7 @@ In Discord, your profile and the member list show **Listening to 🎵 We're no s
    - Windows: the system media sessions (Spotify, Apple Music, Tidal, Deezer, browsers and more).
    - Linux: MPRIS, which nearly every player and browser supports.
    - macOS: Spotify and Apple Music directly. Install [mediaremote-adapter](https://github.com/ungive/mediaremote-adapter) and set `sources.macos_adapter_dir` to cover every app in the Now Playing widget.
-2. **Lyrics.** Lyrix looks in this order: lyrics it found before (cache), your own `.lrc` and `.txt` files, then [LRCLIB](https://lrclib.net), a free open lyrics database. Lyrics without timing are spread across the song and marked as estimated. When nothing is found, the status names the song instead.
+2. **Lyrics.** Lyrix looks in this order: your own `.lrc` and `.txt` files, lyrics it found before (cache), then [LRCLIB](https://lrclib.net), a free open lyrics database. Your files are never cached, so a file you add wins even for a song looked up before. Lyrics without timing are spread across the song and marked as estimated. When nothing is found, the status names the song instead.
 3. **Your status.** Lyrix keeps its own clock between readings, picks the line for the current moment, and sends it to each target no faster than that target allows.
 
 ## Getting started
@@ -41,7 +43,7 @@ Then:
 ```sh
 lyrix config init          # writes a config file with every setting
 lyrix now                  # checks Lyrix can see your music
-lyrix lyrics --artist "Rick Astley" --title "Never Gonna Give You Up"
+lyrix lyrics --artist "Artist" --title "Song title"
 lyrix                      # runs until Ctrl+C
 ```
 
