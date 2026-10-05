@@ -1,4 +1,12 @@
-# 🎵 Lyrixx – Real-Time Spotify Lyrics API
+# 🎵 Lyrixx
+
+> **New: the Lyrix desktop app lives in [`app/`](app/README.md).** It runs on your own computer, reads what's playing from Windows, macOS or Linux, finds synced lyrics (LRCLIB and your own files), and shows the current line as your Discord status. It needs no server and no shared Spotify login.
+>
+> The web API described below is the original version. It stopped working when Spotify changed how its web player hands out access tokens, and it is kept here for reference.
+
+---
+
+## Legacy: Real-Time Spotify Lyrics API
 
 **Lyrixx** is a Node.js-based REST API that fetches synchronized lyrics for Spotify tracks by leveraging Musixmatch data. It offers endpoints to retrieve lyrics using either the Spotify Track ID or the combination of artist and track name.
 
