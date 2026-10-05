@@ -17,7 +17,7 @@ pub struct Paths {
     pub pause_marker: PathBuf,
     /// Cached lyrics (`*.json` files).
     pub cache_dir: PathBuf,
-    /// Holds `lyrix.log`.
+    /// Holds `lyrix.log` and the last start's `lyrix.old.log`.
     pub logs_dir: PathBuf,
 }
 
