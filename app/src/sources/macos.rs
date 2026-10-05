@@ -1757,15 +1757,47 @@ mod tests {
 
     // ---- processes (local, hermetic) -----------------------------------------------
 
+    /// Writes an executable `#!/bin/sh` script running `body` to `dir/name`
+    /// and returns its path.
+    ///
+    /// A child shell writes the file, never this process. Tests run on many
+    /// threads, and while this process holds a file open for writing, every
+    /// process another thread starts inherits that descriptor until its own
+    /// exec. Running the script while such a copy is open fails with ETXTBSY
+    /// ("Text file busy"). The child's descriptor is closed once it exits,
+    /// before this returns.
     #[cfg(unix)]
     fn fake_program(dir: &Path, name: &str, body: &str) -> String {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&path, permissions).unwrap();
+        let written = std::process::Command::new("/bin/sh")
+            .args(["-c", r#"printf '%s\n' "$1" > "$2" && chmod 755 "$2""#, "sh"])
+            .arg(format!("#!/bin/sh\n{body}"))
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(written.success(), "could not write {}", path.display());
         path.to_string_lossy().into_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_programs_run_their_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"printf '%s|%s\n' "$1" '100% \n "quoted"'"#;
+        let program = fake_program(dir.path(), "fake", body);
+        assert_eq!(
+            std::fs::read_to_string(&program).unwrap(),
+            format!("#!/bin/sh\n{body}\n")
+        );
+        let output = std::process::Command::new(&program)
+            .arg("arg")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "arg|100% \\n \"quoted\"\n"
+        );
     }
 
     #[cfg(unix)]
