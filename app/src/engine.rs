@@ -53,7 +53,14 @@ impl Engine {
         chain: Arc<ProviderChain>,
         targets: Vec<Box<dyn StatusTarget>>,
     ) -> Self {
-        Self { config, source, chain, targets, offsets_path: None, pause_marker: None }
+        Self {
+            config,
+            source,
+            chain,
+            targets,
+            offsets_path: None,
+            pause_marker: None,
+        }
     }
 
     /// Reads per-song offsets from this file on every track change.
@@ -73,7 +80,15 @@ impl Engine {
     where
         S: Future<Output = ()> + Send,
     {
-        let _ = (shutdown, &self.config, &self.source, &self.chain, &self.targets, &self.offsets_path, &self.pause_marker);
+        let _ = (
+            shutdown,
+            &self.config,
+            &self.source,
+            &self.chain,
+            &self.targets,
+            &self.offsets_path,
+            &self.pause_marker,
+        );
         todo!()
     }
 }

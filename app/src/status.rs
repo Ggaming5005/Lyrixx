@@ -35,6 +35,14 @@ pub fn compose_status(
     offset_ms: i64,
     now_unix_ms: u64,
 ) -> Option<Status> {
-    let _ = (config, track, lyrics, position_ms, playing, offset_ms, now_unix_ms);
+    let _ = (
+        config,
+        track,
+        lyrics,
+        position_ms,
+        playing,
+        offset_ms,
+        now_unix_ms,
+    );
     todo!()
 }
