@@ -30,6 +30,13 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Whether the tray icon can be seen (see `src/tray/host.rs`); all three are
+# already in the build through Tauri and `lyrix`.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+x11-dl = "2.21"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
 [dev-dependencies]
 async-trait = "0.1"
 tempfile = "3"

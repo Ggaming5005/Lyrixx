@@ -11,15 +11,22 @@
 //! The tooltip is `Lyrix` or `Lyrix: <title> - <artist>`. A left click on the
 //! icon opens the window on Windows and Linux; on macOS it opens the menu, as
 //! menu bar icons do (Linux tray hosts may show the menu instead too).
+//!
+//! An icon nobody can see (stock GNOME shows none) is no way back into Lyrix.
+//! [`Presence`] tells whether it can be seen; when not, the window opens even
+//! with `--minimized` and closing it quits Lyrix.
+
+mod host;
 
 use crate::supervisor::Supervisor;
 use crate::view::View;
 use crate::{actions, window};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager as _, Runtime};
 
 const OPEN_ID: &str = "open";
 const SONG_ID: &str = "song";
@@ -99,7 +106,8 @@ struct Items<R: Runtime> {
 }
 
 /// Creates the tray icon and keeps it in step with the view. Errors when the
-/// system has no tray (the caller then shows the window instead).
+/// icon cannot be made; whether one that was made can be seen is up to
+/// [`Presence`].
 pub fn create<R: Runtime>(app: &AppHandle<R>, supervisor: Arc<Supervisor>) -> tauri::Result<()> {
     let text = tray_text(&supervisor.view());
     let open = MenuItem::with_id(app, OPEN_ID, "Open Lyrix", true, None::<&str>)?;
@@ -124,6 +132,43 @@ pub fn create<R: Runtime>(app: &AppHandle<R>, supervisor: Arc<Supervisor>) -> ta
     let views = supervisor.subscribe();
     tauri::async_runtime::spawn(follow_views(tray, items, text, views));
     Ok(())
+}
+
+/// Whether the tray icon can be seen, and so whether Lyrix may keep running
+/// once its window is closed. Managed as `Arc<Presence>`.
+pub struct Presence {
+    /// Whether [`create`] made the icon.
+    created: bool,
+    host: host::Host,
+    /// The last answer of [`Presence::check`].
+    seen: AtomicBool,
+}
+
+impl Presence {
+    /// `created`: whether [`create`] made the icon. Call it on the main
+    /// thread, in `setup`.
+    pub fn new(created: bool) -> Self {
+        Self {
+            created,
+            host: host::Host::current(),
+            seen: AtomicBool::new(created),
+        }
+    }
+
+    /// Whether the icon can be seen now (on Linux, whether a tray runs to
+    /// show it). The answer is also kept for [`seen`].
+    pub async fn check(&self) -> bool {
+        let seen = self.created && self.host.shows_icons().await;
+        self.seen.store(seen, Ordering::Relaxed);
+        seen
+    }
+}
+
+/// Whether the tray icon could be seen when last checked; false before
+/// there is a tray at all.
+pub fn seen<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.try_state::<Arc<Presence>>()
+        .is_some_and(|presence| presence.seen.load(Ordering::Relaxed))
 }
 
 /// The tray image: in color, or on macOS white on transparent, which the menu
@@ -272,6 +317,17 @@ mod tests {
         let text = tray_text(&view(Some(now("Bonnie & Clyde", "Jay-Z & Beyoncé")), false));
         assert_eq!(text.song, "Bonnie && Clyde - Jay-Z && Beyoncé");
         assert_eq!(text.tooltip, "Lyrix: Bonnie & Clyde - Jay-Z & Beyoncé");
+    }
+
+    #[tokio::test]
+    async fn an_icon_that_was_not_made_is_never_seen() {
+        let presence = Presence {
+            created: false,
+            host: host::Host::default(),
+            seen: AtomicBool::new(true),
+        };
+        assert!(!presence.check().await);
+        assert!(!presence.seen.load(Ordering::Relaxed));
     }
 
     #[test]

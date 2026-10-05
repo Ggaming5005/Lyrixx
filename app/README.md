@@ -27,7 +27,7 @@ This page covers the `lyrix` command, every setting and development. For the app
 
 Download the installer for your system from the latest [release](https://github.com/Ggaming5005/Lyrixx/releases), or from the latest CI run (the **Artifacts** section): **Lyrix-Windows** (setup `.exe`), **Lyrix-macOS** (`.dmg`) or **Lyrix-Linux** (`.AppImage` and `.deb`).
 
-Lyrix opens its window and lives in the tray (the menu bar on macOS). Closing the window keeps it running; **Quit Lyrix** in the tray menu clears your status and stops it. It can start at login, in the tray only. The app and the `lyrix` command share their settings, so either one can change them; run one of them at a time, since both would set the same status.
+Lyrix opens its window and lives in the tray (the menu bar on macOS). Closing the window keeps it running; **Quit Lyrix** in the tray menu clears your status and stops it. It can start at login, in the tray only. Without a tray to show its icon (GNOME without the AppIndicator extension), the window always opens and closing it quits Lyrix. The app and the `lyrix` command share their settings, so either one can change them; run one of them at a time, since both would set the same status.
 
 ### The command
 

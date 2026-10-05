@@ -7,9 +7,12 @@
 //!   one already running.
 //! - Closing the window keeps Lyrix running in the tray; "Quit Lyrix" (tray,
 //!   window or the macOS app menu) clears every status and ends it.
-//! - The window talks to Lyrix only through the commands and the event in
+//! - When no tray icon can be seen (stock GNOME shows none), the window opens
+//!   even with `--minimized`, and closing it quits Lyrix.
+//! - The window talks to Lyrix only through the commands and the events in
 //!   `CONTRACT.md`.
-//! - The log is `lyrix.log` in the logs folder, replaced on every start.
+//! - The log is `lyrix.log` in the logs folder, begun anew on every start;
+//!   the last one is kept as `lyrix.old.log`.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -37,7 +40,7 @@ fn main() {
         // First, so a second launch hands over and ends before anything else starts.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             tracing::info!("Lyrix was launched again");
-            if window::opens_window(args) {
+            if window::opens_window(args) || !tray::seen(app) {
                 window::show(app);
             }
         }))
@@ -47,6 +50,8 @@ fn main() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
+        .manage(window::Closes::default())
+        .on_window_event(window::on_event)
         .invoke_handler(tauri::generate_handler![
             commands::get_view,
             commands::get_settings,
@@ -86,11 +91,12 @@ fn main() {
     };
 
     app.run(|app, event| match event {
-        // The last window closed: keep running in the tray. `app.exit` (Quit)
-        // comes with an exit code and goes through.
+        // The window was destroyed after closing: keep running in the tray
+        // when there is one to see (without, the close quits instead).
+        // `app.exit` (Quit) comes with an exit code and goes through.
         RunEvent::ExitRequested {
             code: None, api, ..
-        } => api.prevent_exit(),
+        } if tray::seen(app) => api.prevent_exit(),
         // Also after macOS's own Quit (Cmd+Q), which skips ExitRequested.
         RunEvent::Exit => {
             if let Some(supervisor) = app.try_state::<Arc<Supervisor>>() {
@@ -106,7 +112,8 @@ fn main() {
 }
 
 /// Starts everything that runs while Lyrix does: the engine, the tray icon,
-/// the `lyrix://view` event, and the window unless started minimized.
+/// the `lyrix://view` event, and the window unless started minimized with a
+/// tray icon to see.
 fn start<R: Runtime>(app: &AppHandle<R>, paths: Paths, opens_window: bool) {
     let supervisor = Arc::new(Supervisor::new(paths));
     app.manage(supervisor.clone());
@@ -115,6 +122,8 @@ fn start<R: Runtime>(app: &AppHandle<R>, paths: Paths, opens_window: bool) {
     if let Err(e) = &tray {
         tracing::error!("could not create the tray icon: {e}");
     }
+    let presence = Arc::new(tray::Presence::new(tray.is_ok()));
+    app.manage(presence.clone());
 
     let handle = app.clone();
     tauri::async_runtime::spawn(view::forward_throttled(
@@ -137,10 +146,24 @@ fn start<R: Runtime>(app: &AppHandle<R>, paths: Paths, opens_window: bool) {
     #[cfg(unix)]
     tauri::async_runtime::spawn(quit_on_signal(app.clone(), supervisor.clone()));
 
-    // Without a tray icon the window is the only way in.
-    if opens_window || tray.is_err() {
+    if opens_window {
         window::show(app);
     }
+    // Without a tray icon to see, the window is the only way in.
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if presence.check().await {
+            tracing::info!("the tray icon is shown");
+        } else {
+            tracing::warn!(
+                "no tray shows Lyrix's icon (on GNOME, the AppIndicator extension adds one), \
+                 so the window stays open and closing it quits Lyrix"
+            );
+            if !opens_window {
+                window::show(&handle);
+            }
+        }
+    });
 }
 
 /// Stops the engine, clearing every status, within about

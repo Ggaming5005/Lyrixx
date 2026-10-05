@@ -2233,6 +2233,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "directories",
+ "gtk",
  "lyrix",
  "serde",
  "serde_json",
@@ -2245,6 +2246,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "x11-dl",
+ "zbus",
 ]
 
 [[package]]

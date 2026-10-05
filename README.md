@@ -41,7 +41,7 @@ Get the files from the [latest release](https://github.com/Ggaming5005/Lyrixx/re
 2. **Play a song** in any player. Lyrix shows the cover, the song and the lyrics, karaoke style.
 3. **Keep the Discord desktop app open** on the same computer. Within a few seconds your profile and the member list show the line you're hearing.
 
-That's it. Closing the window keeps Lyrix running in the tray; **Quit Lyrix** in the tray menu clears your status and stops it. Turn on **Start Lyrix when you log in** in Settings to have it always ready.
+That's it. Closing the window keeps Lyrix running in the tray; **Quit Lyrix** in the tray menu clears your status and stops it. On a desktop without a tray (GNOME without the AppIndicator extension), closing the window quits Lyrix instead. Turn on **Start Lyrix when you log in** in Settings to have it always ready.
 
 > **Nothing on Discord?** In Discord, open **User Settings → Activity Privacy** and switch on **Share my activity**. Lyrix talks to the Discord *desktop* app, so Discord in a browser can't show it.
 
