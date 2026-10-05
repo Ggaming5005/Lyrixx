@@ -7,13 +7,14 @@ use crate::providers::{ProviderChain, Resolved};
 use crate::sources::NowPlayingSource;
 use crate::targets::{StatusTarget, TargetError};
 use crate::types::{Lyrics, PlaybackSnapshot, PlaybackStatus, Status, Track};
+use crate::view::EngineView;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior};
 
 /// How often statuses are recomputed while something plays, at most.
@@ -92,6 +93,8 @@ pub struct Engine {
     targets: Vec<Box<dyn StatusTarget>>,
     offsets_path: Option<PathBuf>,
     pause_marker: Option<PathBuf>,
+    /// Where the current [`EngineView`] is published, for a window.
+    view: Option<watch::Sender<EngineView>>,
     /// Unix ms now. Tests replace it so wall time follows the paused tokio clock.
     wall_clock: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
@@ -110,6 +113,7 @@ impl Engine {
             targets,
             offsets_path: None,
             pause_marker: None,
+            view: None,
             wall_clock: Arc::new(unix_now_ms),
         }
     }
@@ -123,6 +127,14 @@ impl Engine {
     /// Clears all statuses while this file exists.
     pub fn with_pause_marker(mut self, path: PathBuf) -> Self {
         self.pause_marker = Some(path);
+        self
+    }
+
+    /// Publishes what the engine is doing to `view` whenever it changes (see
+    /// [`crate::view`]). Smooth progress is not a change: the position anchor
+    /// only moves on a jump, so a window extrapolates between updates.
+    pub fn with_view(mut self, view: watch::Sender<EngineView>) -> Self {
+        self.view = Some(view);
         self
     }
 
@@ -145,6 +157,7 @@ impl Engine {
             targets,
             offsets_path,
             pause_marker,
+            view: _view,
             wall_clock,
         } = self;
 

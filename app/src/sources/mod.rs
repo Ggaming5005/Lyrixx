@@ -33,6 +33,14 @@ pub trait NowPlayingSource: Send + Sync {
     /// Errors are for a broken source (no session bus, API failure); the engine
     /// logs them and tries again on the next poll.
     async fn snapshot(&self) -> anyhow::Result<Option<PlaybackSnapshot>>;
+
+    /// Cover art of the song the last [`snapshot`](Self::snapshot) reported,
+    /// as a URL a window can load (`https:`, `http:` or `data:`; local files
+    /// are read and returned as `data:` URLs). `Ok(None)` when the player
+    /// has none. Called once per track change, off the render path.
+    async fn artwork(&self) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// Chooses which of several players to follow:

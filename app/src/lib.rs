@@ -18,6 +18,7 @@ pub mod status;
 pub mod targets;
 pub mod template;
 pub mod types;
+pub mod view;
 
 pub use types::*;
 
