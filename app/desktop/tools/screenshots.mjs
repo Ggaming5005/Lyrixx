@@ -10,7 +10,9 @@
 // It serves app/desktop/ui on a local port (with a strict Content Security
 // Policy like the app's), opens it in Chromium with the demo backend
 // (ui/js/mock.js), saves the screenshots to docs/images/ and then opens every
-// scenario on every page, failing when the console shows an error.
+// scenario on every page, failing when the console shows an error. It also
+// runs the checks in old-webkit.mjs (nothing newer than Safari 14, for
+// macOS 11) and flows.mjs (restarts, closing, reloads, previews, modal).
 //
 // On Linux, the window's font stack ends in system-ui, which is usually
 // DejaVu Sans. Set LYRIX_SCREENSHOT_FONTS to a folder with Inter (or install
@@ -22,6 +24,8 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkFlows } from './flows.mjs';
+import { checkOldWebKit } from './old-webkit.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const uiDir = resolve(here, '..', 'ui');
@@ -52,6 +56,7 @@ const SCENARIOS = [
   'discordWaiting',
   'error',
   'estimated',
+  'untimed',
   'musicPaused',
 ];
 const PAGES = ['now', 'lyrics', 'connections', 'settings', 'advanced'];
@@ -165,6 +170,9 @@ async function main() {
   const problems = [];
   let total = 0;
 
+  console.log('checking the scripts and styles for Safari 14…');
+  problems.push(...checkOldWebKit(uiDir));
+
   try {
     for (const [name, query] of SHOTS) {
       const errors = await open(page, base, query, 1600);
@@ -186,6 +194,9 @@ async function main() {
         }
       }
     }
+
+    console.log('checking restarts, closing, reloads, previews and the modal…');
+    problems.push(...(await checkFlows(context, base)));
   } finally {
     await browser.close();
     server.close();
