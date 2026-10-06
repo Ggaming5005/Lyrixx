@@ -23,6 +23,13 @@
 //!
 //! The activity uses `type` 2 (Listening) and `status_display_type` 2 (Details),
 //! so the member list reads "Listening to <lyric line>".
+//!
+//! Rate limit: Discord takes at most 5 activity updates per 20 s. It does not
+//! refuse faster updates with an error; it drops them, and the profile can
+//! stay on an old line, or go blank, until updates slow down.
+//! So updates are at least [`MIN_UPDATE_INTERVAL`] apart, and every
+//! `SET_ACTIVITY` this process sends (clears and engine restarts included)
+//! also counts against one shared [`UpdateBudget`].
 
 use super::{StatusTarget, TargetError};
 use crate::template::truncate_chars;
@@ -30,6 +37,8 @@ use crate::types::Status;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -40,6 +49,17 @@ pub const MIN_FIELD_CHARS: usize = 2;
 
 /// After a failed connection attempt, wait this long before trying again.
 pub const RECONNECT_EVERY: Duration = Duration::from_secs(15);
+
+/// Discord takes at most this many activity updates per [`UPDATE_WINDOW`].
+pub const UPDATES_PER_WINDOW: usize = 5;
+pub const UPDATE_WINDOW: Duration = Duration::from_secs(20);
+/// The shortest time between two updates: [`UPDATES_PER_WINDOW`] spread
+/// evenly over [`UPDATE_WINDOW`], with room for the time a send takes to
+/// reach Discord. A shorter `discord.min_interval_ms` is raised to this.
+pub const MIN_UPDATE_INTERVAL: Duration = Duration::from_millis(4_500);
+/// [`UpdateBudget`] counts over the window plus this, so updates sent right
+/// at the limit are never counted closer together on Discord's side.
+const BUDGET_MARGIN: Duration = Duration::from_secs(1);
 
 /// Frame opcodes.
 pub const OP_HANDSHAKE: u32 = 0;
@@ -540,6 +560,58 @@ impl Endpoint {
     }
 }
 
+/// The activity updates sent lately, to stay within Discord's
+/// [`UPDATES_PER_WINDOW`] per [`UPDATE_WINDOW`] (counted over the window plus
+/// a second of margin).
+#[derive(Debug, Default)]
+pub struct UpdateBudget {
+    /// When each recent update was sent, oldest first.
+    sent: VecDeque<Instant>,
+}
+
+impl UpdateBudget {
+    /// Counts an update sent at `now`, or, when the window is full, says how
+    /// long until the oldest update leaves it (and counts nothing).
+    pub fn take(&mut self, now: Instant) -> Result<(), Duration> {
+        let window = UPDATE_WINDOW + BUDGET_MARGIN;
+        while self
+            .sent
+            .front()
+            .is_some_and(|&at| now.saturating_duration_since(at) >= window)
+        {
+            self.sent.pop_front();
+        }
+        match self.sent.front() {
+            Some(&oldest) if self.sent.len() >= UPDATES_PER_WINDOW => {
+                let wait = (oldest + window).saturating_duration_since(now);
+                Err(wait.max(Duration::from_millis(1)))
+            }
+            _ => {
+                self.sent.push_back(now);
+                Ok(())
+            }
+        }
+    }
+}
+
+/// The budget every Discord target in this process shares, so a new engine
+/// (after a settings change) still counts what the previous one sent.
+fn shared_budget() -> Arc<Mutex<UpdateBudget>> {
+    static SHARED: OnceLock<Arc<Mutex<UpdateBudget>>> = OnceLock::new();
+    SHARED.get_or_init(Arc::default).clone()
+}
+
+/// A new target's budget: the shared one, except in unit tests, where each
+/// target counts only its own updates so tests running side by side cannot
+/// hold each other's updates back.
+fn default_budget() -> Arc<Mutex<UpdateBudget>> {
+    if cfg!(test) {
+        Arc::default()
+    } else {
+        shared_budget()
+    }
+}
+
 /// Rich Presence target. Connects lazily on the first update, and reconnects
 /// (at most every [`RECONNECT_EVERY`]) after Discord closes or restarts. While
 /// Discord is not running, [`set`](StatusTarget::set) returns
@@ -553,11 +625,15 @@ impl Endpoint {
 /// or write error, or Discord closing the connection drops the connection and
 /// is [`TargetError::Unavailable`]. [`clear`](StatusTarget::clear) without an
 /// open connection is `Ok(())` and does not connect: Discord removes the
-/// activity by itself when the connection closes.
+/// activity by itself when the connection closes. An update that would go
+/// over Discord's rate limit (see [`UpdateBudget`]) is not sent and is
+/// [`TargetError::Throttled`].
 pub struct DiscordRpcTarget {
     client_id: String,
     min_interval: Duration,
     show_progress: bool,
+    /// Recent updates, shared with every other Discord target in the process.
+    budget: Arc<Mutex<UpdateBudget>>,
     /// The open connection, if any.
     conn: Option<Connection>,
     /// Where to connect.
@@ -578,6 +654,7 @@ impl DiscordRpcTarget {
             client_id: client_id.into(),
             min_interval,
             show_progress,
+            budget: default_budget(),
             conn: None,
             endpoint: Endpoint::default(),
             last_attempt: None,
@@ -607,6 +684,13 @@ impl DiscordRpcTarget {
     #[cfg(test)]
     pub(crate) fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
+        self
+    }
+
+    /// For tests: count updates in this budget (to share one between targets).
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_budget(mut self, budget: Arc<Mutex<UpdateBudget>>) -> Self {
+        self.budget = budget;
         self
     }
 
@@ -684,7 +768,8 @@ impl DiscordRpcTarget {
         TargetError::Unavailable(message)
     }
 
-    /// Sends `SET_ACTIVITY` with `activity` (null clears) on the open connection.
+    /// Sends `SET_ACTIVITY` with `activity` (null clears) on the open
+    /// connection, when the [`UpdateBudget`] allows another update.
     async fn send_activity(&mut self, activity: Value) -> Result<(), TargetError> {
         let nonce = self.next_nonce();
         let payload = json!({
@@ -698,6 +783,14 @@ impl DiscordRpcTarget {
                 "not connected to Discord".to_string(),
             ));
         };
+        let taken = self
+            .budget
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take(Instant::now());
+        if let Err(retry_after) = taken {
+            return Err(TargetError::Throttled { retry_after });
+        }
         let reply = match tokio::time::timeout(timeout, conn.request(&payload, &nonce)).await {
             Ok(Ok(reply)) => reply,
             Ok(Err(e)) => return Err(self.disconnect(e.to_string())),
@@ -724,8 +817,9 @@ impl StatusTarget for DiscordRpcTarget {
         "discord"
     }
 
+    /// The configured interval, but never below [`MIN_UPDATE_INTERVAL`].
     fn min_interval(&self) -> Duration {
-        self.min_interval
+        self.min_interval.max(MIN_UPDATE_INTERVAL)
     }
 
     async fn set(&mut self, status: &Status) -> Result<(), TargetError> {
@@ -1078,6 +1172,32 @@ mod tests {
         assert_eq!(build_activity(&s, true)["details"], "♪\u{2800}");
     }
 
+    // ---- rate limit ----
+
+    #[test]
+    fn budget_allows_five_updates_per_window_plus_margin() {
+        let window = UPDATE_WINDOW + BUDGET_MARGIN;
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut budget = UpdateBudget::default();
+        for i in 0..5 {
+            assert_eq!(budget.take(at(i * 1_000)), Ok(()), "update {i}");
+        }
+        // The sixth waits until the first leaves the window.
+        assert_eq!(budget.take(at(5_000)), Err(window - Duration::from_secs(5)));
+        assert_eq!(budget.take(at(20_999)), Err(Duration::from_millis(1)));
+        assert_eq!(budget.take(at(21_000)), Ok(()));
+        // The window is full again: the second update leaves it at 22 s.
+        assert_eq!(budget.take(at(21_500)), Err(Duration::from_millis(500)));
+
+        // Updates paced at the minimum interval never wait.
+        let mut budget = UpdateBudget::default();
+        let step = MIN_UPDATE_INTERVAL.as_millis() as u64;
+        for i in 0..50 {
+            assert_eq!(budget.take(at(i * step)), Ok(()), "update {i}");
+        }
+    }
+
     // ---- target basics ----
 
     #[test]
@@ -1126,9 +1246,14 @@ mod tests {
 
     #[test]
     fn name_interval_and_nonces() {
-        let mut target = DiscordRpcTarget::new("123", Duration::from_millis(2_000), true);
+        let mut target = DiscordRpcTarget::new("123", Duration::from_millis(6_000), true);
         assert_eq!(target.name(), "discord");
-        assert_eq!(target.min_interval(), Duration::from_secs(2));
+        assert_eq!(target.min_interval(), Duration::from_secs(6));
+        // Shorter intervals than Discord allows are raised.
+        for ms in [0, 2_000, 4_499] {
+            let fast = DiscordRpcTarget::new("123", Duration::from_millis(ms), true);
+            assert_eq!(fast.min_interval(), MIN_UPDATE_INTERVAL, "{ms} ms");
+        }
         let pid = std::process::id();
         assert_eq!(target.next_nonce(), format!("{pid}-0"));
         assert_eq!(target.next_nonce(), format!("{pid}-1"));
@@ -1655,6 +1780,42 @@ mod tests {
             assert_ne!(nonces[0], nonces[1]);
             assert_ne!(nonces[1], nonces[2]);
             assert_eq!(requests[2]["args"]["activity"]["details"], "line three");
+        }
+
+        #[tokio::test]
+        async fn updates_over_discords_rate_limit_are_held_back_not_sent() {
+            let fake = FakeDiscord::start(Script::Normal);
+            let budget: Arc<Mutex<UpdateBudget>> = Arc::default();
+            let mut target = target_for(&fake).with_budget(budget.clone());
+            for i in 0..UPDATES_PER_WINDOW {
+                target.set(&status(&format!("line {i}"))).await.unwrap();
+            }
+            let err = target.set(&status("one too many")).await.unwrap_err();
+            let TargetError::Throttled { retry_after } = err else {
+                panic!("expected Throttled, got {err:?}");
+            };
+            assert!(retry_after > UPDATE_WINDOW - Duration::from_secs(1));
+            assert!(retry_after <= UPDATE_WINDOW + BUDGET_MARGIN);
+            // A clear counts too, and the connection stays open.
+            assert!(matches!(
+                target.clear().await,
+                Err(TargetError::Throttled { .. })
+            ));
+            assert!(target.is_connected());
+
+            // A new target (the engine restarted) shares the budget.
+            let mut next = target_for(&fake).with_budget(budget);
+            assert!(matches!(
+                next.set(&status("after a restart")).await,
+                Err(TargetError::Throttled { .. })
+            ));
+
+            let requests = fake.requests();
+            assert_eq!(requests.len(), UPDATES_PER_WINDOW, "{requests:?}");
+            assert_eq!(
+                requests[UPDATES_PER_WINDOW - 1]["args"]["activity"]["details"],
+                format!("line {}", UPDATES_PER_WINDOW - 1)
+            );
         }
 
         #[tokio::test]

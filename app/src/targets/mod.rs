@@ -20,6 +20,11 @@ pub enum TargetError {
     /// The engine keeps the value and tries again later.
     #[error("unavailable: {0}")]
     Unavailable(String),
+    /// The target held the update back to stay within the service's own
+    /// limit, and sent nothing. Not a failure: the engine keeps the value and
+    /// tries again after `retry_after`.
+    #[error("held back for {} ms to stay within the service's limit", .retry_after.as_millis())]
+    Throttled { retry_after: Duration },
     /// Anything else.
     #[error(transparent)]
     Other(#[from] anyhow::Error),

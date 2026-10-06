@@ -241,7 +241,7 @@ mod tests {
         let json = serde_json::to_value(settings(&paths(dir.path()))).unwrap();
         // The config keeps the settings file's own snake_case keys.
         assert_eq!(json["config"]["general"]["poll_interval_ms"], 500);
-        assert_eq!(json["defaults"]["discord"]["min_interval_ms"], 2000);
+        assert_eq!(json["defaults"]["discord"]["min_interval_ms"], 4500);
         assert!(json["config"]["lyrics"]["lyrics_dir"].is_null());
         assert!(json["paths"]["lyricsDir"].is_string());
         assert!(json["paths"]["cacheDir"].is_string());

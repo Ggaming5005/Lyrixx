@@ -88,7 +88,7 @@ The config file is TOML. The main settings:
 | `privacy.title_only` | `false` | Show the song, never lyric lines |
 | `general.offset_ms` | `0` | Shift every song's lyrics (positive is later) |
 | `lyrics.lyrics_dir` | data folder | Your own `.lrc` / `.txt` files, named `Artist - Title.lrc` |
-| `discord.min_interval_ms` | `2000` | Fewest milliseconds between Discord updates |
+| `discord.min_interval_ms` | `4500` | Fewest milliseconds between Discord updates. Discord takes at most 5 updates per 20 s and silently drops the rest, so lower values act as 4500 |
 
 ### Advanced mode
 

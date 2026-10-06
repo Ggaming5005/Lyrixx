@@ -101,7 +101,8 @@ pub struct DiscordConfig {
     pub enabled: bool,
     /// The Discord application id whose name appears as "Listening to <name>".
     pub client_id: String,
-    /// Minimum time between updates, in ms.
+    /// Minimum time between updates, in ms. Discord takes at most 5 updates
+    /// per 20 s, so anything below 4500 is used as 4500.
     pub min_interval_ms: u64,
     /// Show a progress bar for the song.
     pub show_progress: bool,
@@ -179,7 +180,7 @@ impl Default for DiscordConfig {
         Self {
             enabled: true,
             client_id: DEFAULT_DISCORD_CLIENT_ID.into(),
-            min_interval_ms: 2_000,
+            min_interval_ms: 4_500,
             show_progress: true,
         }
     }
@@ -565,7 +566,7 @@ mod tests {
         assert_eq!(c.lyrics.lrclib_url, "https://lrclib.net");
         assert!(c.discord.enabled);
         assert_eq!(c.discord.client_id, DEFAULT_DISCORD_CLIENT_ID);
-        assert_eq!(c.discord.min_interval_ms, 2_000);
+        assert_eq!(c.discord.min_interval_ms, 4_500);
         assert!(c.console.enabled);
         assert!(!c.advanced.accept_ban_risk);
         assert!(c.advanced_requested().is_empty());
@@ -663,7 +664,7 @@ mod tests {
         assert_eq!(c, expected);
         // Other fields of a partly set section keep their defaults.
         assert_eq!(c.general.offset_ms, 0);
-        assert_eq!(c.discord.min_interval_ms, 2_000);
+        assert_eq!(c.discord.min_interval_ms, 4_500);
         assert!(c.discord.show_progress);
     }
 

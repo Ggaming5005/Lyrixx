@@ -108,6 +108,17 @@ impl<T: Clone + PartialEq> Pacer<T> {
         Some(self.last_seen.unwrap_or_else(Instant::now))
     }
 
+    /// Whether a pending value may be sent at `now` ([`poll`](Self::poll)
+    /// would hand it out).
+    pub fn is_ready(&self, now: Instant) -> bool {
+        self.pending.is_some() && self.constraint().map_or(true, |at| now >= at)
+    }
+
+    /// Whether a value is waiting to be sent.
+    pub fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
     /// The value last sent, if any.
     pub fn last_sent(&self) -> Option<&T> {
         self.last_sent.as_ref()

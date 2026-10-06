@@ -35,11 +35,16 @@ const ALBUM: &str = "Test Album";
 const LENGTH_US: i64 = 180_000_000;
 const LENGTH_MS: u64 = 180_000;
 const CLIENT_ID: &str = "1234567890";
+/// Lines far enough apart that each one reaches Discord, which takes an
+/// update at most every 4.5 s (the 300 ms in the settings is raised).
 const SYNCED_LYRICS: &str =
-    "[00:00.50] first line\n[00:01.50] second line\n[00:02.50] third line\n";
+    "[00:00.50] first line\n[00:07.00] second line\n[00:12.00] third line\n";
 const LINES: [&str; 3] = ["first line", "second line", "third line"];
 /// When each line starts, in song time.
-const LINE_STARTS_MS: [u64; 3] = [500, 1_500, 2_500];
+const LINE_STARTS_MS: [u64; 3] = [500, 7_000, 12_000];
+/// Discord takes at most 5 updates per 20 s; Lyrix spaces them 4.5 s apart.
+/// A little slack for when the fake Discord reads each frame.
+const MIN_UPDATE_GAP: Duration = Duration::from_millis(4_400);
 
 // ---------------------------------------------------------------------------
 // The test
@@ -102,7 +107,7 @@ async fn lyrix_binary_end_to_end() {
     );
 
     let third = discord
-        .wait_for(Duration::from_secs(20), |events| {
+        .wait_for(Duration::from_secs(30), |events| {
             activities(events)
                 .into_iter()
                 .find(|(_, activity)| details(activity).contains(LINES[2]))
@@ -221,9 +226,19 @@ async fn lyrix_binary_end_to_end() {
 
 /// Every non-null activity is a well-formed Listening activity for the song,
 /// the lines arrive in order, never before they are sung, and the first one
-/// was not skipped.
+/// was not skipped. Updates stay within Discord's rate limit.
 fn check_activities(sent: &[(Instant, Value)], song_start: Instant, logs: &str) {
     assert!(!sent.is_empty(), "no activity was sent\n{logs}");
+    for pair in sent.windows(2) {
+        let gap = pair[1].0.saturating_duration_since(pair[0].0);
+        assert!(
+            gap >= MIN_UPDATE_GAP,
+            "two updates only {} ms apart: {:#} then {:#}\n{logs}",
+            gap.as_millis(),
+            pair[0].1,
+            pair[1].1
+        );
+    }
 
     let mut line_seen: Vec<(usize, Instant)> = Vec::new();
     for (at, activity) in sent {

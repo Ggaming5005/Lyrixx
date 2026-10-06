@@ -42,6 +42,9 @@ const ARTWORK_REREAD_FOR: Duration = Duration::from_secs(3);
 /// The view's position anchor moves when the clock is further than this from
 /// where the published anchor puts the song.
 const VIEW_DRIFT_MS: u64 = 250;
+/// The longest a paced target holds a ready update back for a lyric line
+/// that is about to start (see [`hold_for_line`]).
+const MAX_LINE_HOLD: Duration = Duration::from_millis(1_500);
 
 /// Runs Lyrix until shutdown.
 ///
@@ -63,10 +66,16 @@ const VIEW_DRIFT_MS: u64 = 250;
 ///   (`None` = cleared) built from the target's `min_interval`. The desired value
 ///   is offered to every pacer each tick; ready values are sent with `set` or `clear`.
 ///   On start, a clear is sent to every target so stale statuses from a crash go away.
+/// - A paced target that may send while a lyric line is about to start can
+///   wait for that line instead (see [`hold_for_line`]), so its update shows
+///   the line being sung rather than one about to end.
 /// - Errors: `RateLimited` → `Pacer::on_rate_limited` (switch the target off on
 ///   `Disable`); `Unauthorized` → switch the target off; `Unavailable` and
-///   `Other` → `Pacer::on_failure` (logged, retried later). A switched-off target
-///   is logged once at error level and never used again in this run.
+///   `Other` → `Pacer::on_failure` (logged, retried later); `Throttled` (the
+///   target held the update back for its own rate limit) → `Pacer::on_failure`
+///   and tried again after the wait it named, without logging a failure. A
+///   switched-off target is logged once at error level and never used again in
+///   this run.
 /// - On shutdown every target that is showing something is cleared, waiting at
 ///   most 2 s per target.
 /// - With a view ([`Engine::with_view`]), an [`EngineView`] is published right
@@ -310,6 +319,10 @@ impl Engine {
         for slot in slots.iter_mut().filter(|s| s.enabled && s.maybe_showing()) {
             match tokio::time::timeout(SHUTDOWN_CLEAR_TIMEOUT, slot.target.clear()).await {
                 Ok(Ok(())) => {}
+                Ok(Err(e @ TargetError::Throttled { .. })) => {
+                    // Discord drops the activity anyway when the connection closes.
+                    tracing::debug!(target_name = slot.name, "not clearing the status: {e}");
+                }
                 Ok(Err(e)) => {
                     tracing::warn!(target_name = slot.name, "could not clear the status: {e}");
                 }
@@ -477,11 +490,32 @@ impl State<'_> {
                 if let Some(retry_at) = slot.retry_at {
                     ready = ready.max(retry_at);
                 }
+                if let Some(hold_until) = slot.hold_until {
+                    ready = ready.max(hold_until);
+                }
                 wake = wake.min(ready);
             }
         }
         // Never spin: something ready "now" is handled a moment later.
         wake.max(now + Duration::from_millis(1))
+    }
+
+    /// The next lyric line while playing: when it starts and how long it
+    /// lasts (`None`: it is the last one).
+    fn upcoming_line(&self, now: Instant) -> Option<UpcomingLine> {
+        let until = self.ms_until_next_line(now)?;
+        let playing = self.playing.as_ref()?;
+        let lyrics = playing.lyrics.as_ref()?;
+        let position = self.clock.position_ms(now.into_std())?;
+        let shifted = i128::from(position) - i128::from(self.total_offset(playing));
+        let starts = u64::try_from(shifted + i128::from(until)).ok()?;
+        let lasts_ms = lyrics
+            .next_change_ms(starts)
+            .map(|after| after.saturating_sub(starts));
+        Some(UpcomingLine {
+            at: now + Duration::from_millis(until),
+            lasts_ms,
+        })
     }
 
     /// Song time until the next lyric line starts, while playing.
@@ -710,6 +744,9 @@ struct Slot {
     enabled: bool,
     /// No send before this moment after a failure.
     retry_at: Option<Instant>,
+    /// A ready update waits until this moment for a lyric line that is about
+    /// to start (see [`hold_for_line`]).
+    hold_until: Option<Instant>,
     /// A `set` was attempted since the last successful `clear`, so the target
     /// may show something even if the attempt looked like a failure.
     set_attempted: bool,
@@ -732,6 +769,7 @@ impl Slot {
             pacer,
             enabled: true,
             retry_at: None,
+            hold_until: None,
             set_attempted: false,
             failing: false,
             errors: RepeatFilter::default(),
@@ -809,6 +847,17 @@ impl Slot {
                     }
                 }
             }
+            Ok(Err(TargetError::Throttled { retry_after })) => {
+                // Nothing was sent: try again once the target allows it,
+                // without calling it a failure.
+                self.pacer.on_failure(value);
+                self.retry_at = Some(now + retry_after);
+                tracing::debug!(
+                    target_name = self.name,
+                    "holding the update back for {} ms to stay within the rate limit",
+                    retry_after.as_millis()
+                );
+            }
             Ok(Err(TargetError::Unauthorized(message))) => {
                 self.switch_off(&format!("not authorized: {message}"));
             }
@@ -875,6 +924,33 @@ async fn resend_lost(slots: &mut [Slot]) {
     }
 }
 
+/// A lyric line that starts soon.
+#[derive(Debug, Clone, Copy)]
+struct UpcomingLine {
+    at: Instant,
+    /// How long the line lasts, `None` for the last line.
+    lasts_ms: Option<u64>,
+}
+
+/// When a paced target that may send `now` should wait for a lyric line that
+/// is about to start instead, the moment to send then. It waits when the
+/// line comes within a third of the target's interval (at most
+/// [`MAX_LINE_HOLD`]) and lasts longer than what is left of the line playing
+/// now: otherwise the update would show a line that is about to end, and the
+/// interval would then keep the next one off for most of its time.
+fn hold_for_line(
+    interval: Duration,
+    now: Instant,
+    upcoming: Option<UpcomingLine>,
+) -> Option<Instant> {
+    let upcoming = upcoming?;
+    let wait = upcoming.at.checked_duration_since(now)?;
+    let longer = upcoming
+        .lasts_ms
+        .map_or(true, |ms| Duration::from_millis(ms) > wait);
+    (!wait.is_zero() && wait <= (interval / 3).min(MAX_LINE_HOLD) && longer).then_some(upcoming.at)
+}
+
 /// Offers the desired status to every target's pacer and sends what is ready.
 async fn flush(slots: &mut [Slot], state: &State<'_>) {
     for slot in slots.iter_mut().filter(|s| s.enabled) {
@@ -882,9 +958,26 @@ async fn flush(slots: &mut [Slot], state: &State<'_>) {
         // send an outdated line.
         slot.pacer.offer(state.desired());
         let now = Instant::now();
-        if slot.retry_at.is_some_and(|at| now < at) {
+        if !slot.pacer.has_pending() {
+            slot.hold_until = None;
             continue;
         }
+        if slot.hold_until.is_some() && state.ms_until_next_line(now).is_none() {
+            // Paused, stopped or past the last line: nothing to wait for.
+            slot.hold_until = None;
+        }
+        if slot.retry_at.is_some_and(|at| now < at) || !slot.pacer.is_ready(now.into_std()) {
+            continue;
+        }
+        // Decided once per update, so a run of short lines cannot keep
+        // putting it off.
+        if slot.hold_until.is_none() {
+            slot.hold_until = hold_for_line(slot.pacer.interval(), now, state.upcoming_line(now));
+        }
+        if slot.hold_until.is_some_and(|at| now < at) {
+            continue;
+        }
+        slot.hold_until = None;
         if let Some(value) = slot.pacer.poll(now.into_std()) {
             slot.send(value).await;
         }
@@ -1527,6 +1620,8 @@ mod tests {
     enum Reply {
         Ok,
         RateLimited,
+        /// Held back for this many ms.
+        Throttled(u64),
         Unauthorized,
         Unavailable,
         Other,
@@ -1647,6 +1742,9 @@ mod tests {
             match reply {
                 Reply::Ok => Ok(()),
                 Reply::RateLimited => Err(TargetError::RateLimited { retry_after: None }),
+                Reply::Throttled(ms) => Err(TargetError::Throttled {
+                    retry_after: Duration::from_millis(ms),
+                }),
                 Reply::Unauthorized => Err(TargetError::Unauthorized("token revoked".into())),
                 Reply::Unavailable => Err(TargetError::Unavailable("not running".into())),
                 Reply::Other => Err(TargetError::Other(anyhow::anyhow!("broken pipe"))),
@@ -2627,6 +2725,108 @@ mod tests {
             );
         }
         assert_eq!(fine_log.calls().last(), Some(&(8_000, Call::Clear)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_paced_update_waits_for_a_line_about_to_start() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.play(song("Song"), 0);
+        let lyrics =
+            FakeLyrics::default().with("Song", 0, synced(&[(0, "a"), (3_500, "b"), (8_000, "c")]));
+        let (slow, log) = FakeTarget::new("slow", 3_000, t0);
+        let run = start(engine(config(), &source, lyrics, vec![slow]), t0);
+
+        run.until(10_000).await;
+        run.stop().await;
+
+        // Free again at 3 s, but "a" ends at 3.5 s: sending it would show a
+        // line about to end and keep "b" off until 6 s. It waits for "b".
+        assert_calls(
+            &log.calls(),
+            &[
+                (0, Call::Clear),
+                (3_500, line("b")),
+                (8_000, line("c")),
+                (10_000, Call::Clear),
+            ],
+            2,
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_paced_update_does_not_wait_for_a_shorter_line() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.play(song("Song"), 0);
+        // "b" lasts less than what is left of "a" at 3 s, and "c" starts
+        // further away than a third of the interval.
+        let lyrics = FakeLyrics::default().with(
+            "Song",
+            0,
+            synced(&[(0, "a"), (3_400, "b"), (3_700, "c"), (9_000, "d")]),
+        );
+        let (slow, log) = FakeTarget::new("slow", 3_000, t0);
+        let run = start(engine(config(), &source, lyrics, vec![slow]), t0);
+
+        run.until(7_000).await;
+        run.stop().await;
+
+        assert_calls(
+            &log.calls(),
+            &[
+                (0, Call::Clear),
+                (3_000, line("a")),
+                (6_000, line("c")),
+                (7_000, Call::Clear),
+            ],
+            2,
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_held_back_update_is_sent_later_without_counting_as_a_failure() {
+        let t0 = Instant::now();
+        let source = SourceHandle::default();
+        source.play(song("Song"), 0);
+        let lyrics = FakeLyrics::default().with("Song", 0, synced(&[(0, "One"), (6_000, "Two")]));
+        let (held, log) = FakeTarget::scripted(
+            "held",
+            0,
+            t0,
+            &[Reply::Ok, Reply::Throttled(2_500), Reply::Throttled(1_000)],
+        );
+        let (engine, views) = watched(engine(config(), &source, lyrics, vec![held]), t0);
+        let run = start(engine, t0);
+
+        run.until(8_000).await;
+        run.stop().await;
+
+        // The song (lyrics not there yet) is held back at 0 s for 2.5 s, then
+        // "One" for 1 s more; never switched off, and the newest status goes
+        // out once allowed.
+        assert_calls(
+            &log.calls(),
+            &[
+                (0, Call::Clear),
+                (0, no_lyrics("Song")),
+                (2_500, line("One")),
+                (3_500, line("One")),
+                (6_000, line("Two")),
+                (8_000, Call::Clear),
+            ],
+            2,
+        );
+        for (at, view) in views.seen() {
+            let state = view.targets[0].state;
+            assert!(
+                !matches!(
+                    state,
+                    TargetState::Retrying | TargetState::Waiting | TargetState::Off
+                ),
+                "{state:?} at {at}"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

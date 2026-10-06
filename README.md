@@ -71,7 +71,7 @@ flowchart LR
    - Linux: MPRIS, which nearly every player and browser supports.
    - macOS: Spotify and Apple Music. For every other app in the Now Playing widget, install [mediaremote-adapter](https://github.com/ungive/mediaremote-adapter) and set `sources.macos_adapter_dir`.
 2. **Lyrics.** Lyrix looks in this order: your own files, lyrics it saved before, then LRCLIB. Lyrics without timing are spread across the song and marked as estimated.
-3. **Your status.** Lyrix keeps its own clock between readings, picks the line for this exact moment, and updates Discord no faster than Discord allows.
+3. **Your status.** Lyrix keeps its own clock between readings, picks the line for this exact moment, and updates Discord no faster than Discord allows: at most 5 times every 20 seconds. When lines come faster than that, Lyrix skips some, and when a new line is about to start it waits a moment for it, so Discord shows the line being sung rather than one about to end.
 
 ## Your own lyrics
 
@@ -93,6 +93,7 @@ Lines a bit early or late for one song? Use **Lyrics timing − / +** on the Now
 - Discord → **User Settings → Activity Privacy → Share my activity** must be on.
 - In Lyrix, the **Sharing** switch (bottom left) must be on. The **Live status** card on Now Playing tells you what Discord gets and whether Lyrix is connected.
 - Started Discord after Lyrix? Lyrix reconnects on its own within about 15 seconds.
+- Lines change on Discord every 4 to 5 seconds at most. That is Discord's own limit (5 updates every 20 seconds; faster updates get dropped and freeze the status), so with fast lyrics some lines are skipped.
 
 </details>
 
