@@ -34,8 +34,27 @@ const SAMPLE = [
   ['[00:21.30]', 'The city hummed in a borrowed key'],
 ];
 
+/** A row for one online lyrics database, with its switch. */
+function sourceRow({ api, model, step, key, title, desc, url, label }) {
+  const titleId = nextId(key);
+  return row({
+    lead: stepNumber(step),
+    titleId,
+    title,
+    desc: [
+      `${desc} `,
+      h(
+        'button',
+        { type: 'button', class: 'link-btn', onClick: () => openUrl(api, url) },
+        label,
+        icon('external'),
+      ),
+    ],
+    control: boundSwitch(model, `lyrics.${key}`, { labelledBy: titleId }),
+  });
+}
+
 export function createLyricsPage({ root, api, model }) {
-  const lrclibId = nextId('lrclib');
   const cacheId = nextId('cache');
 
   const folderPath = h('span', { class: 'path', title: model.paths.lyricsDir, text: model.paths.lyricsDir });
@@ -57,20 +76,37 @@ export function createLyricsPage({ root, api, model }) {
     ),
   });
 
-  const lrclib = row({
-    lead: stepNumber(2),
-    titleId: lrclibId,
+  const lrclib = sourceRow({
+    api,
+    model,
+    step: 2,
+    key: 'lrclib',
     title: 'LRCLIB',
-    desc: [
-      'A free, open lyrics database, no account needed. ',
-      h(
-        'button',
-        { type: 'button', class: 'link-btn', onClick: () => openUrl(api, 'https://lrclib.net') },
-        'lrclib.net',
-        icon('external'),
-      ),
-    ],
-    control: boundSwitch(model, 'lyrics.lrclib', { labelledBy: lrclibId }),
+    desc: 'A free, open lyrics database, no account needed.',
+    url: 'https://lrclib.net',
+    label: 'lrclib.net',
+  });
+
+  const netease = sourceRow({
+    api,
+    model,
+    step: 3,
+    key: 'netease',
+    title: 'NetEase Cloud Music',
+    desc: 'A huge catalog of timed lyrics in many languages, no account needed. It isn’t an official service, so it may stop answering.',
+    url: 'https://music.163.com',
+    label: 'music.163.com',
+  });
+
+  const kugou = sourceRow({
+    api,
+    model,
+    step: 4,
+    key: 'kugou',
+    title: 'Kugou',
+    desc: 'Strongest for Chinese and other Asian songs, no account needed. It isn’t an official service either.',
+    url: 'https://www.kugou.com',
+    label: 'kugou.com',
   });
 
   const flowEnd = h(
@@ -107,7 +143,7 @@ export function createLyricsPage({ root, api, model }) {
       'div',
       { class: 'page-inner' },
       pageHeader('Lyrics', 'Lyrix finds lyrics on its own. This is where it looks, in order.'),
-      group({ title: 'Where lyrics come from', icon: 'search' }, yourFiles, lrclib, flowEnd),
+      group({ title: 'Where lyrics come from', icon: 'search' }, yourFiles, lrclib, netease, kugou, flowEnd),
       group(
         {
           title: 'Saved lyrics',

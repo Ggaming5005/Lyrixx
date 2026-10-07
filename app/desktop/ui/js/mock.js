@@ -60,7 +60,14 @@ function defaultConfig() {
       profanity_words: [],
     },
     privacy: { blocked_apps: [], blocked_artists: [], title_only: false },
-    lyrics: { lyrics_dir: null, cache: true, lrclib: true, lrclib_url: 'https://lrclib.net' },
+    lyrics: {
+      lyrics_dir: null,
+      cache: true,
+      lrclib: true,
+      lrclib_url: 'https://lrclib.net',
+      netease: true,
+      kugou: true,
+    },
     sources: { preferred_apps: [], macos_adapter_dir: null },
     discord: {
       enabled: true,

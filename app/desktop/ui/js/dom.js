@@ -168,6 +168,10 @@ export function sourceName(source) {
   switch (source) {
     case 'lrclib':
       return 'LRCLIB';
+    case 'netease':
+      return 'NetEase';
+    case 'kugou':
+      return 'Kugou';
     case 'local':
       return 'Your files';
     case 'cache':

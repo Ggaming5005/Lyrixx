@@ -360,7 +360,7 @@ export function createSettingsPage({ root, api, store, model, info }) {
     ),
     row({
       lead: 'globe',
-      title: 'Lyrics from LRCLIB and your own files',
+      title: 'Lyrics from your own files, LRCLIB, NetEase and Kugou',
       desc: 'Lyrix runs on your computer: no account, no server, no audio recording.',
     }),
   );

@@ -84,6 +84,10 @@ pub struct LyricsConfig {
     pub lrclib: bool,
     /// LRCLIB server, in case you run your own copy.
     pub lrclib_url: String,
+    /// Use NetEase Cloud Music after LRCLIB (no account; not an official API).
+    pub netease: bool,
+    /// Use Kugou after NetEase (no account; not an official API).
+    pub kugou: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -179,6 +183,8 @@ impl Default for LyricsConfig {
             cache: true,
             lrclib: true,
             lrclib_url: "https://lrclib.net".into(),
+            netease: true,
+            kugou: true,
         }
     }
 }
@@ -573,6 +579,8 @@ mod tests {
         assert!(c.lyrics.cache);
         assert!(c.lyrics.lrclib);
         assert_eq!(c.lyrics.lrclib_url, "https://lrclib.net");
+        assert!(c.lyrics.netease);
+        assert!(c.lyrics.kugou);
         assert!(c.discord.enabled);
         assert_eq!(c.discord.client_id, DEFAULT_DISCORD_CLIENT_ID);
         assert_eq!(c.discord.min_interval_ms, 4_500);
@@ -611,6 +619,8 @@ mod tests {
         c.lyrics.cache = false;
         c.lyrics.lrclib = false;
         c.lyrics.lrclib_url = "http://localhost:3000".into();
+        c.lyrics.netease = false;
+        c.lyrics.kugou = false;
         c.sources.preferred_apps = vec!["spotify".into()];
         c.sources.macos_adapter_dir = Some(PathBuf::from("/opt/mediaremote-adapter"));
         c.discord.enabled = false;

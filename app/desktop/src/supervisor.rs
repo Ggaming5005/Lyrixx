@@ -13,8 +13,10 @@ use anyhow::Context;
 use lyrix::config::{Config, Severity, BAN_WARNING};
 use lyrix::engine::Engine;
 use lyrix::providers::cache::LyricsCache;
+use lyrix::providers::kugou::KugouProvider;
 use lyrix::providers::local::LocalLrcProvider;
 use lyrix::providers::lrclib::LrclibProvider;
+use lyrix::providers::netease::NeteaseProvider;
 use lyrix::providers::{LyricsProvider, ProviderChain};
 use lyrix::targets::discord_rpc::DiscordRpcTarget;
 use lyrix::targets::StatusTarget;
@@ -300,14 +302,18 @@ fn targets(config: &Config) -> Vec<Box<dyn StatusTarget>> {
 }
 
 /// Where lyrics are looked up, in order, decided from the settings alone.
-/// The same as the `lyrix` command's: your own files first, then LRCLIB when
-/// it is on, with the cache when it is on.
+/// The same as the `lyrix` command's: your own files first, then LRCLIB,
+/// NetEase and Kugou when each is on, with the cache when it is on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LyricsPlan {
     /// Your own `.lrc` / `.txt` files.
     pub local_dir: PathBuf,
     /// LRCLIB server, without a trailing slash, when LRCLIB is on.
     pub lrclib_url: Option<String>,
+    /// NetEase Cloud Music, after LRCLIB.
+    pub netease: bool,
+    /// Kugou, after NetEase.
+    pub kugou: bool,
     /// Cache folder, when the cache is on.
     pub cache_dir: Option<PathBuf>,
 }
@@ -325,15 +331,23 @@ impl LyricsPlan {
         Self {
             local_dir: config.lyrics_dir(),
             lrclib_url,
+            netease: config.lyrics.netease,
+            kugou: config.lyrics.kugou,
             cache_dir: config.lyrics.cache.then_some(cache_dir),
         }
     }
 
-    /// `local, lrclib (<url>), cache`, for the log.
+    /// `local, lrclib (<url>), netease, kugou, cache`, for the log.
     pub fn describe(&self) -> String {
         let mut parts = vec!["local".to_string()];
         if let Some(url) = &self.lrclib_url {
             parts.push(format!("lrclib ({url})"));
+        }
+        if self.netease {
+            parts.push("netease".to_string());
+        }
+        if self.kugou {
+            parts.push("kugou".to_string());
         }
         if self.cache_dir.is_some() {
             parts.push("cache".to_string());
@@ -348,6 +362,12 @@ impl LyricsPlan {
             let lrclib = LrclibProvider::new(url.clone())
                 .with_context(|| format!("could not set up LRCLIB at {url}"))?;
             providers.push(Box::new(lrclib));
+        }
+        if self.netease {
+            providers.push(Box::new(NeteaseProvider::new()?));
+        }
+        if self.kugou {
+            providers.push(Box::new(KugouProvider::new()?));
         }
         let cache = self.cache_dir.clone().map(LyricsCache::new);
         Ok(ProviderChain::new(providers, cache))
@@ -475,19 +495,33 @@ mod tests {
             LyricsPlan {
                 local_dir: PathBuf::from("/mine"),
                 lrclib_url: Some("https://lrclib.example".into()),
+                netease: true,
+                kugou: true,
                 cache_dir: Some(cache.clone()),
             }
         );
         assert_eq!(
             plan.describe(),
-            "local, lrclib (https://lrclib.example), cache"
+            "local, lrclib (https://lrclib.example), netease, kugou, cache"
         );
-        assert!(plan.build().is_ok());
+        let chain = plan.build().unwrap();
+        let names: Vec<&str> = chain.health().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, vec!["local", "lrclib", "netease", "kugou"]);
+
+        config.lyrics.netease = false;
+        let plan = LyricsPlan::from_config(&config, cache.clone());
+        assert_eq!(
+            plan.describe(),
+            "local, lrclib (https://lrclib.example), kugou, cache"
+        );
 
         config.lyrics.lrclib = false;
+        config.lyrics.kugou = false;
         config.lyrics.cache = false;
         let plan = LyricsPlan::from_config(&config, cache);
         assert_eq!(plan.lrclib_url, None);
+        assert!(!plan.netease);
+        assert!(!plan.kugou);
         assert_eq!(plan.cache_dir, None);
         assert_eq!(plan.describe(), "local");
         let chain = plan.build().unwrap();

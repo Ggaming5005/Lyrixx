@@ -1,8 +1,14 @@
 //! Lyrics providers and the chain that tries them in order.
 
 pub mod cache;
+pub mod credits;
+mod http;
+pub mod kugou;
 pub mod local;
 pub mod lrclib;
+pub mod netease;
+#[cfg(test)]
+mod test_server;
 
 use crate::types::{Lyrics, Track};
 use async_trait::async_trait;
@@ -50,7 +56,10 @@ pub enum Resolved {
 ///   from them return at once; plain ones are kept as the first fallback.
 /// - A cache hit (including a fresh "not found" entry) returns without asking
 ///   the other providers; a local fallback still beats a cached "not found"
-///   or cached plain lyrics.
+///   or cached plain lyrics. A cached "not found" or cached plain lyrics
+///   count only when every online provider that is on now was asked for them
+///   ([`cache::CacheEntry::providers`]), so turning a provider on looks the
+///   song up again.
 /// - Synced lyrics win: if a provider returns unsynced lyrics, they are kept as
 ///   a fallback and the remaining providers are still asked for synced ones.
 ///   Instrumental results count as final.
@@ -74,6 +83,9 @@ pub enum Resolved {
 ///   instrumental was found while a provider failed or was skipped. So a
 ///   network outage is not remembered as "not found", nor plain lyrics as the
 ///   answer when a failing provider may have synced ones.
+/// - When a song is looked up again because a provider was turned on, and
+///   that lookup is incomplete and finds nothing, the lyrics cached before
+///   are used (and kept in the cache).
 /// - A provider that is tried again after [`SKIP_FOR`] and fails once more is
 ///   skipped again right away; one success resets it.
 /// - A cache that cannot be written only logs a warning.
@@ -143,19 +155,29 @@ impl ProviderChain {
             }
         }
 
+        // Lyrics cached by a lookup that did not ask every provider that is
+        // on now: used only when this lookup cannot finish.
+        let mut stale: Option<Lyrics> = None;
         if let Some(cache) = &self.cache {
             if let Some(entry) = cache.get(&track).await {
-                let best = match entry.lyrics {
-                    Some(lyrics) if is_final(&lyrics) => Some(lyrics),
-                    cached => local_fallback.or(cached),
-                };
-                return match best {
-                    Some(mut lyrics) => {
-                        spread(&mut lyrics, duration_ms);
-                        Resolved::Found(lyrics)
-                    }
-                    None => Resolved::NotFound,
-                };
+                let final_hit = entry.lyrics.as_ref().is_some_and(is_final);
+                let asked_all = self
+                    .online_names()
+                    .all(|name| entry.providers.iter().any(|asked| asked == name));
+                if final_hit || asked_all {
+                    let best = match entry.lyrics {
+                        Some(lyrics) if final_hit => Some(lyrics),
+                        cached => local_fallback.or(cached),
+                    };
+                    return match best {
+                        Some(mut lyrics) => {
+                            spread(&mut lyrics, duration_ms);
+                            Resolved::Found(lyrics)
+                        }
+                        None => Resolved::NotFound,
+                    };
+                }
+                stale = entry.lyrics;
             }
         }
 
@@ -195,12 +217,23 @@ impl ProviderChain {
                     lyrics: outcome.clone(),
                     fetched_at: unix_now_secs(),
                     duration_ms: track.duration_ms,
+                    providers: self.online_names().map(str::to_string).collect(),
                 };
                 if let Err(e) = cache.put(&track, &entry).await {
                     tracing::warn!("could not write to the lyrics cache: {e:#}");
                 }
             }
         }
+
+        // Nothing new because a provider failed: what was cached before is
+        // still better than nothing.
+        let outcome = match (outcome, stale) {
+            (None, Some(mut lyrics)) if incomplete => {
+                spread(&mut lyrics, duration_ms);
+                Some(lyrics)
+            }
+            (outcome, _) => outcome,
+        };
 
         let best = if found_final {
             outcome
@@ -216,6 +249,14 @@ impl ProviderChain {
             Some(lyrics) => Resolved::Found(lyrics),
             None => Resolved::NotFound,
         }
+    }
+
+    /// Names of the providers that are not your own files, in order.
+    fn online_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.providers
+            .iter()
+            .filter(|provider| !provider.is_local())
+            .map(|provider| provider.name())
     }
 
     /// Asks one provider (unless it is skipped), keeping its health.
@@ -1059,5 +1100,133 @@ mod tests {
         let normalized = crate::matcher::normalize_track(&track());
         let cache = cache::LyricsCache::new(dir.path().to_path_buf());
         assert!(cache.get(&normalized).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn turning_a_provider_on_looks_cached_songs_up_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let normalized = crate::matcher::normalize_track(&track());
+        let cache = cache::LyricsCache::new(dir.path().to_path_buf());
+
+        // LRCLIB alone has nothing: "not found" is cached for it.
+        let chain = chain_with_cache(
+            vec![FakeProvider::new("lrclib", Reply::Nothing)],
+            dir.path(),
+        );
+        assert_eq!(chain.resolve(&track()).await, Resolved::NotFound);
+        let entry = cache.get(&normalized).await.unwrap();
+        assert_eq!(entry.providers, vec!["lrclib"]);
+
+        // NetEase is turned on: the song is looked up again and found.
+        let lrclib = FakeProvider::new("lrclib", Reply::Nothing);
+        let lrclib_calls = lrclib.calls();
+        let netease = FakeProvider::new("netease", Reply::Found(synced("from netease")));
+        let chain = chain_with_cache(vec![lrclib, netease], dir.path());
+        let lyrics = found(chain.resolve(&track()).await);
+        assert_eq!(lyrics.source, "netease");
+        assert_eq!(call_count(&lrclib_calls), 1);
+
+        // Next time it comes from the cache.
+        let lrclib = FakeProvider::new("lrclib", Reply::Nothing);
+        let lrclib_calls = lrclib.calls();
+        let netease = FakeProvider::new("netease", Reply::Fail("offline"));
+        let netease_calls = netease.calls();
+        let chain = chain_with_cache(vec![lrclib, netease], dir.path());
+        assert_eq!(found(chain.resolve(&track()).await).source, "netease");
+        assert_eq!(call_count(&lrclib_calls), 0);
+        assert_eq!(call_count(&netease_calls), 0);
+    }
+
+    #[tokio::test]
+    async fn plain_lyrics_cached_before_are_looked_up_again_for_synced_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        // An entry from before providers were recorded.
+        let cache = cache::LyricsCache::new(dir.path().to_path_buf());
+        let normalized = crate::matcher::normalize_track(&track());
+        let old = cache::CacheEntry {
+            lyrics: Some(Lyrics {
+                source: "lrclib".into(),
+                ..plain(&["old words"])
+            }),
+            fetched_at: unix_now_secs(),
+            duration_ms: normalized.duration_ms,
+            providers: Vec::new(),
+        };
+        cache.put(&normalized, &old).await.unwrap();
+
+        let chain = chain_with_cache(
+            vec![
+                FakeProvider::new("lrclib", Reply::Found(plain(&["old words"]))),
+                FakeProvider::new("kugou", Reply::Found(synced("timed words"))),
+            ],
+            dir.path(),
+        );
+        let lyrics = found(chain.resolve(&track()).await);
+        assert!(lyrics.synced);
+        assert_eq!(lyrics.source, "kugou");
+        let entry = cache.get(&normalized).await.unwrap();
+        assert_eq!(entry.lyrics.unwrap().source, "kugou");
+    }
+
+    #[tokio::test]
+    async fn cached_lyrics_are_used_when_the_new_lookup_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = chain_with_cache(
+            vec![FakeProvider::new(
+                "lrclib",
+                Reply::Found(plain(&["cached words"])),
+            )],
+            dir.path(),
+        );
+        assert_eq!(found(chain.resolve(&track()).await).source, "lrclib");
+
+        // NetEase is turned on while offline: the cached lyrics still show,
+        // spread over the song, and stay cached for the next try.
+        let netease = FakeProvider::new("netease", Reply::Fail("offline"));
+        let netease_calls = netease.calls();
+        let chain = chain_with_cache(
+            vec![FakeProvider::new("lrclib", Reply::Fail("offline")), netease],
+            dir.path(),
+        );
+        let lyrics = found(chain.resolve(&track()).await);
+        assert_eq!(texts(&lyrics), vec!["cached words"]);
+        assert_eq!(lyrics.source, "lrclib");
+        assert!(!lyrics.synced);
+        assert_eq!(call_count(&netease_calls), 1);
+        let cache = cache::LyricsCache::new(dir.path().to_path_buf());
+        let normalized = crate::matcher::normalize_track(&track());
+        assert_eq!(
+            cache.get(&normalized).await.unwrap().providers,
+            vec!["lrclib"]
+        );
+
+        // When every provider answers and none has lyrics, that is the answer.
+        let chain = chain_with_cache(
+            vec![
+                FakeProvider::new("lrclib", Reply::Nothing),
+                FakeProvider::new("netease", Reply::Nothing),
+            ],
+            dir.path(),
+        );
+        assert_eq!(chain.resolve(&track()).await, Resolved::NotFound);
+    }
+
+    #[tokio::test]
+    async fn turning_a_provider_off_keeps_what_it_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = chain_with_cache(
+            vec![
+                FakeProvider::new("lrclib", Reply::Nothing),
+                FakeProvider::new("netease", Reply::Found(plain(&["from netease"]))),
+            ],
+            dir.path(),
+        );
+        assert_eq!(found(chain.resolve(&track()).await).source, "netease");
+
+        let lrclib = FakeProvider::new("lrclib", Reply::Fail("should not be asked"));
+        let lrclib_calls = lrclib.calls();
+        let chain = chain_with_cache(vec![lrclib], dir.path());
+        assert_eq!(found(chain.resolve(&track()).await).source, "netease");
+        assert_eq!(call_count(&lrclib_calls), 0);
     }
 }

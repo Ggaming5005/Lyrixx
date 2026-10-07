@@ -20,7 +20,7 @@
 ## Why Lyrix
 
 - **Works with almost any player.** Spotify, Apple Music, YouTube Music in the browser, Tidal, Deezer, foobar2000, VLC… If your computer's media controls can see it, Lyrix can too. No account to connect.
-- **Real lyrics, perfectly timed.** Synced lyrics come from [LRCLIB](https://lrclib.net), a free and open lyrics database, or from your own `.lrc` files. If a song has no lyrics, your status shows the song name instead.
+- **Real lyrics, perfectly timed.** Synced lyrics come from your own `.lrc` files, [LRCLIB](https://lrclib.net) (a free and open lyrics database), or, when LRCLIB doesn't have the song, NetEase Cloud Music and Kugou. If a song has no lyrics anywhere, your status shows the song name instead.
 - **Zero setup for Discord.** Open Lyrix, keep Discord running, and your profile shows **Listening to Lyrix** with the Lyrix picture, the current line and a progress bar. No token, no login.
 - **Light.** A small native app that sits in your tray. The window opens only when you want it, and nothing runs on a server.
 - **Yours to tune.** Status templates, a per-song timing nudge, a profanity filter, hidden apps and artists, and a "song only" mode for your work account.
@@ -63,6 +63,7 @@ flowchart LR
     F["Your .lrc / .txt files"] --> L
     C["Lyrics saved on<br/>this computer"] --> L
     R["LRCLIB<br/>open lyrics database"] --> L
+    N["NetEase · Kugou<br/>when LRCLIB has nothing"] --> L
     L -->|current line| D["Discord<br/>Listening to Lyrix"]
 ```
 
@@ -70,7 +71,7 @@ flowchart LR
    - Windows: the system media sessions (every app in the volume/media flyout).
    - Linux: MPRIS, which nearly every player and browser supports.
    - macOS: Spotify and Apple Music. For every other app in the Now Playing widget, install [mediaremote-adapter](https://github.com/ungive/mediaremote-adapter) and set `sources.macos_adapter_dir`.
-2. **Lyrics.** Lyrix looks in this order: your own files, lyrics it saved before, then LRCLIB. Lyrics without timing are spread across the song and marked as estimated.
+2. **Lyrics.** Lyrix looks in this order: your own files, lyrics it saved before, LRCLIB, then NetEase Cloud Music and Kugou, two big catalogs (especially for Chinese, Japanese and Korean songs) that need no account. They aren't official services, so they may stop answering one day; each has its own switch on the Lyrics page. Credit lines such as "Lyrics by" are left out, and lyrics without timing are spread across the song and marked as estimated.
 3. **Your status.** Lyrix keeps its own clock between readings, picks the line for this exact moment, and updates Discord no faster than Discord allows: at most 5 times every 20 seconds. When lines come faster than that, Lyrix skips some, and when a new line is about to start it waits a moment for it, so Discord shows the line being sung rather than one about to end.
 
 ## Your own lyrics
@@ -138,7 +139,7 @@ Advanced mode holds switches for options that use your own account in ways the s
 
 ## Coming later
 
-More places for your lyrics: Slack, Telegram, GitHub, Matrix, Microsoft Teams, an OBS overlay for streamers, and webhooks. More lyrics sources too.
+More places for your lyrics: Slack, Telegram, GitHub, Matrix, Microsoft Teams, an OBS overlay for streamers, and webhooks.
 
 ## Command line and building from source
 
@@ -153,7 +154,7 @@ cargo run -p lyrix -- now      # the command
 
 ## Credits
 
-- Lyrics from [LRCLIB](https://lrclib.net), a free, open, community lyrics database.
+- Lyrics from [LRCLIB](https://lrclib.net), a free, open, community lyrics database, and from [NetEase Cloud Music](https://music.163.com) and [Kugou](https://www.kugou.com).
 - Inspired by [BlueCatSoftware/Lyrix](https://github.com/BlueCatSoftware/Lyrix).
 - Built with [Rust](https://www.rust-lang.org) and [Tauri](https://tauri.app).
 

@@ -406,6 +406,8 @@ impl TestEnv {
              \n\
              [lyrics]\n\
              lrclib_url = \"{lrclib_url}\"\n\
+             netease = false\n\
+             kugou = false\n\
              \n\
              [discord]\n\
              client_id = \"{CLIENT_ID}\"\n\

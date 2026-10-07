@@ -36,6 +36,11 @@ pub struct CacheEntry {
     pub fetched_at: u64,
     /// Duration of the track that was looked up, if known.
     pub duration_ms: Option<u64>,
+    /// The online providers that were asked (`lrclib`, `netease` …), so a
+    /// lookup that may have missed better lyrics runs again once another
+    /// provider is turned on. Empty in entries written before this was kept.
+    #[serde(default)]
+    pub providers: Vec<String>,
 }
 
 /// See the module docs.
@@ -272,6 +277,7 @@ mod tests {
             lyrics: Some(lyrics()),
             fetched_at,
             duration_ms,
+            providers: vec!["lrclib".into()],
         }
     }
 
@@ -280,6 +286,7 @@ mod tests {
             lyrics: None,
             fetched_at,
             duration_ms,
+            providers: vec!["lrclib".into(), "netease".into()],
         }
     }
 
@@ -556,6 +563,21 @@ mod tests {
             value["lyrics"]["lines"][0]["text"],
             "Never gonna give you up"
         );
+        assert_eq!(value["providers"], serde_json::json!(["lrclib"]));
+    }
+
+    #[tokio::test]
+    async fn entries_from_before_providers_were_kept_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LyricsCache::new(dir.path().to_path_buf());
+        let json = format!(
+            r#"{{"lyrics":null,"fetched_at":{},"duration_ms":213000}}"#,
+            unix_now_secs()
+        );
+        std::fs::write(cache.entry_path(&rick()), json).unwrap();
+        let entry = cache.get(&rick()).await.unwrap();
+        assert_eq!(entry.lyrics, None);
+        assert!(entry.providers.is_empty());
     }
 
     // ----- misses ----------------------------------------------------------
@@ -707,6 +729,7 @@ mod tests {
             }),
             fetched_at: 0,
             duration_ms: Some(300_000),
+            providers: Vec::new(),
         };
         let t = track("Explosions in the Sky", "Your Hand in Mine", Some(300_000));
         cache.put(&t, &entry).await.unwrap();

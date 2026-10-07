@@ -28,8 +28,10 @@ use anyhow::{bail, Context};
 use clap::{ArgAction, Args, Parser, Subcommand};
 use lyrix::config::{Config, ConfigIssue, Offsets, Severity, BAN_WARNING};
 use lyrix::providers::cache::LyricsCache;
+use lyrix::providers::kugou::KugouProvider;
 use lyrix::providers::local::LocalLrcProvider;
 use lyrix::providers::lrclib::LrclibProvider;
+use lyrix::providers::netease::NeteaseProvider;
 use lyrix::providers::{LyricsProvider, ProviderChain, Resolved};
 use lyrix::sources::NowPlayingSource;
 use lyrix::targets::console::ConsoleTarget;
@@ -433,6 +435,10 @@ struct ProviderPlan {
     local_dir: PathBuf,
     /// LRCLIB server, without a trailing slash, when LRCLIB is on.
     lrclib_url: Option<String>,
+    /// NetEase Cloud Music, after LRCLIB.
+    netease: bool,
+    /// Kugou, after NetEase.
+    kugou: bool,
     /// Cache folder, when the cache is on.
     cache_dir: Option<PathBuf>,
 }
@@ -454,11 +460,13 @@ impl ProviderPlan {
         Self {
             local_dir: config.lyrics_dir(),
             lrclib_url,
+            netease: config.lyrics.netease,
+            kugou: config.lyrics.kugou,
             cache_dir: config.lyrics.cache.then_some(cache_dir),
         }
     }
 
-    /// `local (<dir>), lrclib (<url>), cache`.
+    /// `local (<dir>), lrclib (<url>), netease, kugou, cache`.
     fn describe(&self) -> String {
         let mut parts = vec![format!(
             "local ({})",
@@ -467,13 +475,20 @@ impl ProviderPlan {
         if let Some(url) = &self.lrclib_url {
             parts.push(format!("lrclib ({})", one_line(url)));
         }
+        if self.netease {
+            parts.push("netease".to_string());
+        }
+        if self.kugou {
+            parts.push("kugou".to_string());
+        }
         if self.cache_dir.is_some() {
             parts.push("cache".to_string());
         }
         parts.join(", ")
     }
 
-    /// Builds the chain: local files, then LRCLIB when on, with the cache when on.
+    /// Builds the chain: local files, then LRCLIB, NetEase and Kugou when
+    /// each is on, with the cache when on.
     fn build(&self) -> anyhow::Result<ProviderChain> {
         let mut providers: Vec<Box<dyn LyricsProvider>> =
             vec![Box::new(LocalLrcProvider::new(self.local_dir.clone()))];
@@ -481,6 +496,12 @@ impl ProviderPlan {
             let lrclib = LrclibProvider::new(url.clone())
                 .with_context(|| format!("could not set up LRCLIB at {url}"))?;
             providers.push(Box::new(lrclib));
+        }
+        if self.netease {
+            providers.push(Box::new(NeteaseProvider::new()?));
+        }
+        if self.kugou {
+            providers.push(Box::new(KugouProvider::new()?));
         }
         let cache = self.cache_dir.clone().map(LyricsCache::new);
         Ok(ProviderChain::new(providers, cache))
@@ -1839,13 +1860,18 @@ mod tests {
         let plan = ProviderPlan::from_config(&config, PathBuf::from("/c/lyrics"));
         assert_eq!(plan.local_dir, config.lyrics_dir());
         assert_eq!(plan.lrclib_url.as_deref(), Some("https://lrclib.net"));
+        assert!(plan.netease);
+        assert!(plan.kugou);
         assert_eq!(plan.cache_dir, Some(PathBuf::from("/c/lyrics")));
         let text = plan.describe();
         assert!(text.starts_with("local ("), "{text}");
         assert!(
-            text.ends_with("lrclib (https://lrclib.net), cache"),
+            text.ends_with("lrclib (https://lrclib.net), netease, kugou, cache"),
             "{text}"
         );
+        let chain = plan.build().unwrap();
+        let names: Vec<&str> = chain.health().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, vec!["local", "lrclib", "netease", "kugou"]);
     }
 
     #[test]
@@ -1853,6 +1879,8 @@ mod tests {
         let mut config = Config::default();
         config.lyrics.lyrics_dir = Some(PathBuf::from("/music/lrc"));
         config.lyrics.lrclib = false;
+        config.lyrics.netease = false;
+        config.lyrics.kugou = false;
         config.lyrics.cache = false;
         let plan = ProviderPlan::from_config(&config, PathBuf::from("/c"));
         assert_eq!(
@@ -1860,10 +1888,15 @@ mod tests {
             ProviderPlan {
                 local_dir: PathBuf::from("/music/lrc"),
                 lrclib_url: None,
+                netease: false,
+                kugou: false,
                 cache_dir: None,
             }
         );
         assert_eq!(plan.describe(), "local (/music/lrc)");
+        let chain = plan.build().unwrap();
+        let names: Vec<&str> = chain.health().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, vec!["local"]);
 
         config.lyrics.lrclib = true;
         config.lyrics.lrclib_url = " http://localhost:3000// ".into();
@@ -1873,6 +1906,14 @@ mod tests {
             plan.describe(),
             "local (/music/lrc), lrclib (http://localhost:3000)"
         );
+
+        config.lyrics.lrclib = false;
+        config.lyrics.kugou = true;
+        let plan = ProviderPlan::from_config(&config, PathBuf::from("/c"));
+        assert_eq!(plan.describe(), "local (/music/lrc), kugou");
+        let chain = plan.build().unwrap();
+        let names: Vec<&str> = chain.health().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, vec!["local", "kugou"]);
     }
 
     #[test]
@@ -1986,12 +2027,14 @@ mod tests {
         let plan = ProviderPlan {
             local_dir: PathBuf::from("/music/lrc"),
             lrclib_url: Some("https://lrclib.net".into()),
+            netease: true,
+            kugou: false,
             cache_dir: Some(PathBuf::from("/c")),
         };
         assert_eq!(
             startup_line("mpris", &plan, &["console", "discord"], false),
             "Lyrix is running. Reading mpris; lyrics from local (/music/lrc), lrclib \
-             (https://lrclib.net), cache; showing on console, discord. Press Ctrl+C to stop."
+             (https://lrclib.net), netease, cache; showing on console, discord. Press Ctrl+C to stop."
         );
         let line = startup_line("windows-media", &plan, &["discord"], true);
         assert!(line.contains("Paused"), "{line}");

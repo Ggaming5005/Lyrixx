@@ -290,6 +290,50 @@ pub fn song_key(track: &Track) -> String {
     format!("{artist} - {title}")
 }
 
+/// True when one of the `candidate` texts (a search result's title, aliases,
+/// album) names a recording without the singing and none of the `wanted`
+/// texts does, so `Song (Instrumental)` is not used for `Song`, but is for
+/// `Song (Karaoke)`.
+///
+/// Such recordings are named by the words `Instrumental(s)`, `Karaoke` and
+/// `Inst`, the word pairs `Off Vocal`, `Backing Track` and `Minus One`
+/// (compared on [`normalize_key`], so letter case and punctuation do not
+/// matter), or anywhere in the text by `伴奏`, `纯音乐`, `純音樂`, `カラオケ`
+/// and `オフボーカル`.
+pub fn is_other_version(wanted: &[&str], candidate: &[&str]) -> bool {
+    let without_singing = |texts: &[&str]| texts.iter().any(|text| names_no_singing(text));
+    without_singing(candidate) && !without_singing(wanted)
+}
+
+/// The items scoring at least `min_score`, best first, at most `max` of
+/// them. Ties keep their order, and a NaN score never passes.
+pub fn best_scored<T>(scored: Vec<(f64, T)>, min_score: f64, max: usize) -> Vec<T> {
+    let mut passing: Vec<(f64, T)> = scored
+        .into_iter()
+        .filter(|(score, _)| *score >= min_score)
+        .collect();
+    // `sort_by` is stable, so equal scores keep their order.
+    passing.sort_by(|a, b| b.0.total_cmp(&a.0));
+    passing
+        .into_iter()
+        .take(max)
+        .map(|(_, item)| item)
+        .collect()
+}
+
+/// See [`is_other_version`].
+fn names_no_singing(text: &str) -> bool {
+    let key = normalize_key(text);
+    let words: Vec<&str> = key.split(' ').collect();
+    NO_SINGING_WORDS.iter().any(|word| words.contains(word))
+        || words.windows(2).any(|pair| {
+            NO_SINGING_PAIRS
+                .iter()
+                .any(|&(first, second)| pair[0] == first && pair[1] == second)
+        })
+        || NO_SINGING_MARKERS.iter().any(|marker| key.contains(marker))
+}
+
 // ---------------------------------------------------------------------------
 // Title parsing
 // ---------------------------------------------------------------------------
@@ -394,6 +438,18 @@ const FEAT_WORDS: [&str; 3] = ["feat", "ft", "featuring"];
 
 /// A featured-artist credit standing in the title itself (`Song ft. Someone`).
 const BARE_FEAT_WORDS: [&str; 3] = ["feat.", "ft.", "featuring"];
+
+/// Words that name a recording without the singing, for [`is_other_version`].
+const NO_SINGING_WORDS: [&str; 4] = ["instrumental", "instrumentals", "karaoke", "inst"];
+
+/// Word pairs that name a recording without the singing.
+const NO_SINGING_PAIRS: [(&str, &str); 3] =
+    [("off", "vocal"), ("backing", "track"), ("minus", "one")];
+
+/// Chinese and Japanese text that names a recording without the singing:
+/// accompaniment, pure music (simplified and traditional), karaoke and off
+/// vocal.
+const NO_SINGING_MARKERS: [&str; 5] = ["伴奏", "纯音乐", "純音樂", "カラオケ", "オフボーカル"];
 
 /// Artist names that say nothing about the artist.
 const PLACEHOLDER_ARTISTS: [&str; 10] = [
@@ -1994,5 +2050,72 @@ mod tests {
         assert!(!is_number_like("th"));
         assert!(!is_number_like(""));
         assert!(!is_number_like("٢٠١١"));
+    }
+
+    #[test]
+    fn versions_without_singing_are_told_apart() {
+        for candidate in [
+            "Yellow (Instrumental)",
+            "Yellow - Instrumental Version",
+            "Yellow (Karaoke Version)",
+            "Yellow (Inst.)",
+            "Yellow [Off Vocal]",
+            "Yellow (Backing Track)",
+            "Yellow (Minus One)",
+            "晴天 (伴奏)",
+            "晴天(伴奏版)",
+            "晴天 纯音乐版",
+            "夜に駆ける (カラオケ)",
+            "夜に駆ける -オフボーカル-",
+        ] {
+            assert!(is_other_version(&["Yellow"], &[candidate]), "{candidate}");
+        }
+        // The album counts as much as the title.
+        assert!(is_other_version(
+            &["Yellow", "Parachutes"],
+            &["Yellow", "Parachutes (Instrumentals)"]
+        ));
+        for candidate in [
+            "Yellow",
+            "Yellow (Live)",
+            "Yellow (Acoustic)",
+            "Mr. Brightside",
+            "Instrumentality",
+            "Install",
+        ] {
+            assert!(!is_other_version(&["Yellow"], &[candidate]), "{candidate}");
+        }
+        // Wanted on purpose.
+        assert!(!is_other_version(
+            &["Yellow (Karaoke)"],
+            &["Yellow (Instrumental)"]
+        ));
+        assert!(!is_other_version(
+            &["Song", "Karaoke Hits"],
+            &["Song (Karaoke)"]
+        ));
+        assert!(!is_other_version(&[], &[]));
+    }
+
+    #[test]
+    fn best_scored_keeps_the_best_in_order() {
+        let scored = vec![
+            (0.65, "a"),
+            (0.9, "b"),
+            (0.7, "c"),
+            (f64::NAN, "nan"),
+            (0.9, "d"),
+            (1.0, "e"),
+        ];
+        assert_eq!(
+            best_scored(scored.clone(), 0.7, 10),
+            vec!["e", "b", "d", "c"]
+        );
+        assert_eq!(best_scored(scored.clone(), 0.7, 2), vec!["e", "b"]);
+        assert_eq!(best_scored(scored, 0.95, 0), Vec::<&str>::new());
+        assert_eq!(
+            best_scored(Vec::<(f64, u8)>::new(), 0.0, 3),
+            Vec::<u8>::new()
+        );
     }
 }
