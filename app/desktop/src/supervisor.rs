@@ -287,11 +287,14 @@ pub fn discord_client_id(config: &Config) -> Option<String> {
 /// console target is never used.
 fn targets(config: &Config) -> Vec<Box<dyn StatusTarget>> {
     match discord_client_id(config) {
-        Some(client_id) => vec![Box::new(DiscordRpcTarget::new(
-            client_id,
-            Duration::from_millis(config.discord.min_interval_ms),
-            config.discord.show_progress,
-        ))],
+        Some(client_id) => vec![Box::new(
+            DiscordRpcTarget::new(
+                client_id,
+                Duration::from_millis(config.discord.min_interval_ms),
+                config.discord.show_progress,
+            )
+            .with_large_image(config.discord.large_image.clone()),
+        )],
         None => Vec::new(),
     }
 }

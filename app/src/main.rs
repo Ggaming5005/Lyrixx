@@ -650,11 +650,14 @@ async fn cmd_run(config_path: &Path, args: &RunArgs) -> anyhow::Result<u8> {
         targets.push(Box::new(ConsoleTarget::stdout()));
     }
     if let Some(client_id) = &plan.discord_client_id {
-        targets.push(Box::new(DiscordRpcTarget::new(
-            client_id.clone(),
-            Duration::from_millis(config.discord.min_interval_ms),
-            config.discord.show_progress,
-        )));
+        targets.push(Box::new(
+            DiscordRpcTarget::new(
+                client_id.clone(),
+                Duration::from_millis(config.discord.min_interval_ms),
+                config.discord.show_progress,
+            )
+            .with_large_image(config.discord.large_image.clone()),
+        ));
     }
     if targets.is_empty() {
         bail!(plan.nothing_on_message(config_path));

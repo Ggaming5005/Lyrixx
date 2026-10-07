@@ -56,7 +56,10 @@ To show a different name, create your own application in the [Discord Developer 
 ```toml
 [discord]
 client_id = "your application id"
+large_image = "your image name"
 ```
+
+`large_image` is the picture next to the lyrics: the name of an image you uploaded to that application under **Rich Presence → Art Assets** (square, at least 512×512), or an `https://` link to a picture. Leave it empty (`""`) for no picture. New images can take a few minutes to show up in Discord.
 
 ## Commands
 
@@ -88,6 +91,7 @@ The config file is TOML. The main settings:
 | `privacy.title_only` | `false` | Show the song, never lyric lines |
 | `general.offset_ms` | `0` | Shift every song's lyrics (positive is later) |
 | `lyrics.lyrics_dir` | data folder | Your own `.lrc` / `.txt` files, named `Artist - Title.lrc` |
+| `discord.large_image` | Lyrix's art | The picture next to the lyrics: an image name from your application's Art Assets, or an `https://` link. `""` shows none |
 | `discord.min_interval_ms` | `4500` | Fewest milliseconds between Discord updates. Discord takes at most 5 updates per 20 s and silently drops the rest, so lower values act as 4500 |
 
 ### Advanced mode

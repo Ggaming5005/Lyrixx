@@ -62,7 +62,13 @@ function defaultConfig() {
     privacy: { blocked_apps: [], blocked_artists: [], title_only: false },
     lyrics: { lyrics_dir: null, cache: true, lrclib: true, lrclib_url: 'https://lrclib.net' },
     sources: { preferred_apps: [], macos_adapter_dir: null },
-    discord: { enabled: true, client_id: DEFAULT_CLIENT_ID, min_interval_ms: 4500, show_progress: true },
+    discord: {
+      enabled: true,
+      client_id: DEFAULT_CLIENT_ID,
+      min_interval_ms: 4500,
+      show_progress: true,
+      large_image: 'gradient_musical_note_app_icon',
+    },
     console: { enabled: true },
     advanced: { accept_ban_risk: false, discord_custom_status: false, spotify_cookie_lyrics: false },
   };

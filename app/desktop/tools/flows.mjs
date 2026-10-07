@@ -1,7 +1,8 @@
 // Checks how the window behaves over time, with the demo backend
 // (ui/js/mock.js and its `window.lyrixDemo`): restarts after a save, the
 // window closing with a change waiting, settings edited in the file, the
-// status preview, lyrics with no timing and the modal without showModal().
+// status preview, the Discord picture, lyrics with no timing and the modal
+// without showModal().
 //
 // screenshots.mjs runs `checkFlows` after the screenshots; each check opens
 // its own page and returns what went wrong, as readable lines.
@@ -184,6 +185,47 @@ const FLOWS = {
     check(intro.startsWith('Empty'), `"Intro or break" got a line: ${intro}`);
   },
 
+  /** The profile preview's picture follows its setting; "Use Lyrix" restores it. */
+  async 'the Discord picture follows its setting'(page, check) {
+    const link = 'https://example.invalid/cover.svg';
+    await page.route(link, (route) =>
+      route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"/>' }),
+    );
+    const art = page.locator('#page-connections .activity-art');
+    const img = art.locator('img');
+    check(await art.isVisible(), 'the preview shows no picture by default');
+    check((await img.getAttribute('src')) === null, 'the Lyrix picture loads a link');
+
+    await page.getByText('Use your own Discord application').click();
+    const field = page.getByRole('textbox', { name: 'Picture name or link' });
+    await field.fill('  ');
+    await page.waitForTimeout(100);
+    check(!(await art.isVisible()), 'the preview kept a picture with none set');
+    await field.fill(link);
+    await field.press('Enter');
+    // The save restarts the demo engine; the next one waits for that.
+    await page.waitForTimeout(1600);
+    check(await img.isVisible(), 'the preview does not show the linked picture');
+    check((await img.getAttribute('src')) === link, 'the preview did not load the link');
+
+    const before = (await saved(page)).length;
+    await page.getByRole('button', { name: 'Use Lyrix' }).click();
+    await page
+      .waitForFunction((count) => window.lyrixDemo.saved().length > count, before, { timeout: 3000 })
+      .catch(() => {});
+    await page.waitForTimeout(150);
+    check((await field.inputValue()) === 'gradient_musical_note_app_icon', '"Use Lyrix" did not restore the picture');
+    check(!(await img.isVisible()), 'the preview kept the linked picture after "Use Lyrix"');
+    const sent = await saved(page);
+    const last = sent[sent.length - 1];
+    check(
+      sent.length === before + 1 &&
+        last.discord.large_image === 'gradient_musical_note_app_icon' &&
+        last.discord.client_id === '1556752305653809272',
+      `"Use Lyrix" did not save Lyrix's picture and id at once: ${JSON.stringify(sent.map((c) => c.discord))}`,
+    );
+  },
+
   /** Plain lyrics with no timing: listed, none current, no estimate. */
   async 'lyrics with no timing'(page, check) {
     const state = await page.evaluate(() => ({
@@ -247,6 +289,7 @@ const RUNS = [
   ['closing sends a change queued behind a save', 'scenario=playing&page=settings'],
   ['settings reload on focus', 'scenario=playing&page=settings'],
   ['previews like the engine', 'scenario=playing&page=settings'],
+  ['the Discord picture follows its setting', 'scenario=playing&page=connections'],
   ['lyrics with no timing', 'scenario=untimed'],
   ['the modal', 'scenario=playing&page=advanced', { label: 'dialog' }],
   [

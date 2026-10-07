@@ -22,7 +22,9 @@
 //! - A ping (op 3) must be answered with a pong (op 4) carrying the same payload.
 //!
 //! The activity uses `type` 2 (Listening) and `status_display_type` 2 (Details),
-//! so the member list reads "Listening to <lyric line>".
+//! so the member list reads "Listening to <lyric line>". Its picture
+//! (`assets.large_image`) names an image uploaded to the application in the
+//! Developer Portal (Rich Presence, Art Assets), or is a link to one.
 //!
 //! Rate limit: Discord takes at most 5 activity updates per 20 s. It does not
 //! refuse faster updates with an error; it drops them, and the profile can
@@ -46,6 +48,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// shorter than 2.
 pub const MAX_FIELD_CHARS: usize = 128;
 pub const MIN_FIELD_CHARS: usize = 2;
+/// The longest picture name or link sent as `large_image`, in UTF-16 units
+/// like Discord counts. Discord rejects the whole activity over its limit, so
+/// a longer one is left out instead.
+pub const MAX_IMAGE_CHARS: usize = 256;
 
 /// After a failed connection attempt, wait this long before trying again.
 pub const RECONNECT_EVERY: Duration = Duration::from_secs(15);
@@ -166,10 +172,17 @@ pub fn fit_field(s: &str) -> String {
 /// - `timestamps` (Unix milliseconds): when `show_progress` and
 ///   `status.started_at_unix_ms` is known: `start` = started_at; plus `end` =
 ///   started_at + duration when the duration is known and not zero
-/// - `assets.large_text`: the album, when known and at least 2 characters,
-///   fitted like the other fields (only together with a `large_image`, so it is
-///   left out for now)
-pub fn build_activity(status: &Status, show_progress: bool) -> serde_json::Value {
+/// - `assets.large_image`: `large_image` trimmed (an art asset name or an
+///   image link), left out when that is empty or longer than
+///   [`MAX_IMAGE_CHARS`]
+/// - `assets.large_text` (shown when hovering the picture): the album, when
+///   known and at least 2 characters, fitted like the other fields; only
+///   together with a `large_image`
+pub fn build_activity(
+    status: &Status,
+    show_progress: bool,
+    large_image: &str,
+) -> serde_json::Value {
     let title = status.track.title.trim();
     let artist = status.track.artist.trim();
     let mut state = match (title.is_empty(), artist.is_empty()) {
@@ -196,6 +209,17 @@ pub fn build_activity(status: &Status, show_progress: bool) -> serde_json::Value
             }
             activity.insert("timestamps".into(), Value::Object(timestamps));
         }
+    }
+
+    let large_image = large_image.trim();
+    if !large_image.is_empty() && large_image.encode_utf16().count() <= MAX_IMAGE_CHARS {
+        let mut assets = Map::new();
+        assets.insert("large_image".into(), json!(large_image));
+        let album = status.track.album.as_deref().map_or("", str::trim);
+        if album.chars().count() >= MIN_FIELD_CHARS {
+            assets.insert("large_text".into(), json!(fit_field(album)));
+        }
+        activity.insert("assets".into(), Value::Object(assets));
     }
     Value::Object(activity)
 }
@@ -632,6 +656,8 @@ pub struct DiscordRpcTarget {
     client_id: String,
     min_interval: Duration,
     show_progress: bool,
+    /// The picture next to the lyrics (see [`build_activity`]).
+    large_image: String,
     /// Recent updates, shared with every other Discord target in the process.
     budget: Arc<Mutex<UpdateBudget>>,
     /// The open connection, if any.
@@ -654,6 +680,7 @@ impl DiscordRpcTarget {
             client_id: client_id.into(),
             min_interval,
             show_progress,
+            large_image: String::new(),
             budget: default_budget(),
             conn: None,
             endpoint: Endpoint::default(),
@@ -663,6 +690,13 @@ impl DiscordRpcTarget {
             request_timeout: REQUEST_TIMEOUT,
             nonce_counter: 0,
         }
+    }
+
+    /// Shows this picture next to the lyrics: an art asset name of the
+    /// application, or an image link (see [`build_activity`]).
+    pub fn with_large_image(mut self, large_image: impl Into<String>) -> Self {
+        self.large_image = large_image.into();
+        self
     }
 
     /// For tests on Unix: connect to this socket path instead of searching.
@@ -829,7 +863,7 @@ impl StatusTarget for DiscordRpcTarget {
             ));
         }
         self.ensure_connected().await?;
-        let activity = build_activity(status, self.show_progress);
+        let activity = build_activity(status, self.show_progress, &self.large_image);
         self.send_activity(activity).await
     }
 
@@ -1071,7 +1105,7 @@ mod tests {
 
     #[test]
     fn activity_for_a_lyric_line() {
-        let activity = build_activity(&status("Never gonna give you up"), true);
+        let activity = build_activity(&status("Never gonna give you up"), true, "");
         assert_eq!(
             activity,
             json!({
@@ -1089,7 +1123,7 @@ mod tests {
     fn activity_marks_estimated_timing() {
         let mut s = status("a line");
         s.estimated = true;
-        let activity = build_activity(&s, true);
+        let activity = build_activity(&s, true, "");
         assert_eq!(
             activity["state"],
             "Never Gonna Give You Up · Rick Astley (estimated timing)"
@@ -1101,12 +1135,18 @@ mod tests {
     fn activity_without_artist() {
         let mut s = status("x line");
         s.track.artist = String::new();
-        assert_eq!(build_activity(&s, true)["state"], "Never Gonna Give You Up");
+        assert_eq!(
+            build_activity(&s, true, "")["state"],
+            "Never Gonna Give You Up"
+        );
         s.track.artist = "   ".into();
-        assert_eq!(build_activity(&s, true)["state"], "Never Gonna Give You Up");
+        assert_eq!(
+            build_activity(&s, true, "")["state"],
+            "Never Gonna Give You Up"
+        );
         s.estimated = true;
         assert_eq!(
-            build_activity(&s, true)["state"],
+            build_activity(&s, true, "")["state"],
             "Never Gonna Give You Up (estimated timing)"
         );
     }
@@ -1115,22 +1155,22 @@ mod tests {
     fn activity_without_title_or_artist() {
         let mut s = status("x line");
         s.track.title = String::new();
-        assert_eq!(build_activity(&s, true)["state"], "Rick Astley");
+        assert_eq!(build_activity(&s, true, "")["state"], "Rick Astley");
         s.track.artist = String::new();
-        assert_eq!(build_activity(&s, true)["state"], "\u{2800}\u{2800}");
+        assert_eq!(build_activity(&s, true, "")["state"], "\u{2800}\u{2800}");
     }
 
     #[test]
     fn activity_with_unknown_duration_has_only_start() {
         let mut s = status("x line");
         s.track.duration_ms = None;
-        let activity = build_activity(&s, true);
+        let activity = build_activity(&s, true, "");
         assert_eq!(
             activity["timestamps"],
             json!({"start": 1_700_000_000_000u64})
         );
         s.track.duration_ms = Some(0);
-        let activity = build_activity(&s, true);
+        let activity = build_activity(&s, true, "");
         assert_eq!(
             activity["timestamps"],
             json!({"start": 1_700_000_000_000u64})
@@ -1139,11 +1179,11 @@ mod tests {
 
     #[test]
     fn activity_without_progress() {
-        let activity = build_activity(&status("x line"), false);
+        let activity = build_activity(&status("x line"), false, "");
         assert!(activity.get("timestamps").is_none());
         let mut s = status("x line");
         s.started_at_unix_ms = None;
-        assert!(build_activity(&s, true).get("timestamps").is_none());
+        assert!(build_activity(&s, true, "").get("timestamps").is_none());
     }
 
     #[test]
@@ -1151,7 +1191,7 @@ mod tests {
         let mut s = status("x line");
         s.started_at_unix_ms = Some(u64::MAX - 10);
         s.track.duration_ms = Some(u64::MAX);
-        let activity = build_activity(&s, true);
+        let activity = build_activity(&s, true, "");
         assert_eq!(activity["timestamps"]["end"], json!(u64::MAX));
         assert_eq!(activity["timestamps"]["start"], json!(u64::MAX - 10));
     }
@@ -1160,7 +1200,7 @@ mod tests {
     fn activity_fields_are_fitted() {
         let mut s = status(&"lyric ".repeat(100));
         s.track.title = "T".repeat(300);
-        let activity = build_activity(&s, true);
+        let activity = build_activity(&s, true, "");
         let details = activity["details"].as_str().unwrap();
         let state = activity["state"].as_str().unwrap();
         assert!(details.chars().count() <= MAX_FIELD_CHARS);
@@ -1169,7 +1209,60 @@ mod tests {
 
         let mut s = status("♪");
         s.kind = StatusKind::Instrumental;
-        assert_eq!(build_activity(&s, true)["details"], "♪\u{2800}");
+        assert_eq!(build_activity(&s, true, "")["details"], "♪\u{2800}");
+    }
+
+    #[test]
+    fn activity_shows_the_picture_with_the_album_on_hover() {
+        let activity = build_activity(&status("a line"), true, "  lyrix_art  ");
+        assert_eq!(
+            activity["assets"],
+            json!({"large_image": "lyrix_art", "large_text": "Whenever You Need Somebody"})
+        );
+        let link = "https://example.com/cover.png";
+        assert_eq!(
+            build_activity(&status("a line"), true, link)["assets"]["large_image"],
+            link
+        );
+    }
+
+    #[test]
+    fn activity_picture_without_a_usable_album_has_no_hover_text() {
+        let mut s = status("a line");
+        for album in [None, Some(""), Some("  "), Some(" X ")] {
+            s.track.album = album.map(str::to_string);
+            assert_eq!(
+                build_activity(&s, true, "lyrix_art")["assets"],
+                json!({"large_image": "lyrix_art"}),
+                "album {album:?}"
+            );
+        }
+        s.track.album = Some("A".repeat(300));
+        let text = build_activity(&s, true, "lyrix_art")["assets"]["large_text"].clone();
+        assert_eq!(text.as_str().unwrap().chars().count(), MAX_FIELD_CHARS);
+    }
+
+    #[test]
+    fn activity_has_no_picture_when_none_is_set_or_it_is_too_long() {
+        for image in ["", "   "] {
+            assert!(build_activity(&status("a line"), true, image)
+                .get("assets")
+                .is_none());
+        }
+        let longest = "x".repeat(MAX_IMAGE_CHARS);
+        assert_eq!(
+            build_activity(&status("a line"), true, &longest)["assets"]["large_image"],
+            longest.as_str()
+        );
+        let too_long = "x".repeat(MAX_IMAGE_CHARS + 1);
+        assert!(build_activity(&status("a line"), true, &too_long)
+            .get("assets")
+            .is_none());
+        // 129 characters, but 258 UTF-16 units.
+        let too_long = "🎵".repeat(MAX_IMAGE_CHARS / 2 + 1);
+        assert!(build_activity(&status("a line"), true, &too_long)
+            .get("assets")
+            .is_none());
     }
 
     // ---- rate limit ----
@@ -1764,6 +1857,24 @@ mod tests {
             target.set(&status("x line")).await.unwrap();
             let requests = fake.requests();
             assert!(requests[0]["args"]["activity"].get("timestamps").is_none());
+        }
+
+        #[tokio::test]
+        async fn the_picture_is_sent_only_when_one_is_set() {
+            let fake = FakeDiscord::start(Script::Normal);
+            let mut target = DiscordRpcTarget::new("1", Duration::ZERO, true)
+                .with_socket_path(fake.path.clone());
+            target.set(&status("x line")).await.unwrap();
+            let mut pictured = DiscordRpcTarget::new("1", Duration::ZERO, true)
+                .with_large_image("lyrix_art")
+                .with_socket_path(fake.path.clone());
+            pictured.set(&status("y line")).await.unwrap();
+            let requests = fake.requests();
+            assert!(requests[0]["args"]["activity"].get("assets").is_none());
+            assert_eq!(
+                requests[1]["args"]["activity"]["assets"],
+                json!({"large_image": "lyrix_art", "large_text": "Whenever You Need Somebody"})
+            );
         }
 
         #[tokio::test]

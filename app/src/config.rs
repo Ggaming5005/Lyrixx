@@ -17,6 +17,10 @@ pub const BAN_WARNING: &str = "USING THIS MIGHT GET YOU BANNED. YOU HAVE BEEN WA
 /// application to show a different name. Application ids are public.
 pub const DEFAULT_DISCORD_CLIENT_ID: &str = "1556752305653809272";
 
+/// The picture uploaded to Lyrix's own Discord application (Developer Portal,
+/// Rich Presence, Art Assets) that profiles show next to the lyrics.
+pub const DEFAULT_DISCORD_LARGE_IMAGE: &str = "gradient_musical_note_app_icon";
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -106,6 +110,10 @@ pub struct DiscordConfig {
     pub min_interval_ms: u64,
     /// Show a progress bar for the song.
     pub show_progress: bool,
+    /// The picture next to the lyrics: the name of an image uploaded to the
+    /// application in `client_id` (Developer Portal, Rich Presence, Art
+    /// Assets), or an `https://` link to one. Empty shows no picture.
+    pub large_image: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -182,6 +190,7 @@ impl Default for DiscordConfig {
             client_id: DEFAULT_DISCORD_CLIENT_ID.into(),
             min_interval_ms: 4_500,
             show_progress: true,
+            large_image: DEFAULT_DISCORD_LARGE_IMAGE.into(),
         }
     }
 }
@@ -567,6 +576,7 @@ mod tests {
         assert!(c.discord.enabled);
         assert_eq!(c.discord.client_id, DEFAULT_DISCORD_CLIENT_ID);
         assert_eq!(c.discord.min_interval_ms, 4_500);
+        assert_eq!(c.discord.large_image, DEFAULT_DISCORD_LARGE_IMAGE);
         assert!(c.console.enabled);
         assert!(!c.advanced.accept_ban_risk);
         assert!(c.advanced_requested().is_empty());
@@ -607,6 +617,7 @@ mod tests {
         c.discord.client_id = "42".into();
         c.discord.min_interval_ms = i64::MAX as u64;
         c.discord.show_progress = false;
+        c.discord.large_image = "https://example.com/cover.png".into();
         c.console.enabled = false;
         c.advanced.accept_ban_risk = true;
         c.advanced.discord_custom_status = true;
@@ -666,6 +677,7 @@ mod tests {
         assert_eq!(c.general.offset_ms, 0);
         assert_eq!(c.discord.min_interval_ms, 4_500);
         assert!(c.discord.show_progress);
+        assert_eq!(c.discord.large_image, DEFAULT_DISCORD_LARGE_IMAGE);
     }
 
     #[test]

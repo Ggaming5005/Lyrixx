@@ -21,7 +21,7 @@
 
 - **Works with almost any player.** Spotify, Apple Music, YouTube Music in the browser, Tidal, Deezer, foobar2000, VLC… If your computer's media controls can see it, Lyrix can too. No account to connect.
 - **Real lyrics, perfectly timed.** Synced lyrics come from [LRCLIB](https://lrclib.net), a free and open lyrics database, or from your own `.lrc` files. If a song has no lyrics, your status shows the song name instead.
-- **Zero setup for Discord.** Open Lyrix, keep Discord running, and your profile shows **Listening to Lyrix** with the current line and a progress bar. No token, no login.
+- **Zero setup for Discord.** Open Lyrix, keep Discord running, and your profile shows **Listening to Lyrix** with the Lyrix picture, the current line and a progress bar. No token, no login.
 - **Light.** A small native app that sits in your tray. The window opens only when you want it, and nothing runs on a server.
 - **Yours to tune.** Status templates, a per-song timing nudge, a profanity filter, hidden apps and artists, and a "song only" mode for your work account.
 
@@ -50,7 +50,7 @@ That's it. Closing the window keeps Lyrix running in the tray; **Quit Lyrix** in
 | | |
 | --- | --- |
 | <img alt="Connections: Discord with a preview of your profile, and the places coming later" src="docs/images/connections.jpg"> | <img alt="Settings: status text templates with a live preview" src="docs/images/settings.jpg"> |
-| **Connections.** See exactly what your profile shows, switch the progress bar, or use your own Discord application name. | **Settings.** Write your own status with `{line}`, `{next}`, `{title}`, `{artist}` and `{album}`, with a live preview. Changes save on their own. |
+| **Connections.** See exactly what your profile shows, switch the progress bar, or use your own Discord application name and picture. | **Settings.** Write your own status with `{line}`, `{next}`, `{title}`, `{artist}` and `{album}`, with a live preview. Changes save on their own. |
 | <img alt="A song without lyrics: Lyrix shows the song name and how to add your own lyrics" src="docs/images/lyrics-not-found.jpg"> | <img alt="Advanced mode with its ban warning" src="docs/images/advanced.jpg"> |
 | **No lyrics?** Your status shows the song instead, and one click opens the folder for your own `.lrc` file. | **Advanced mode.** Riskier options live behind a clear warning and stay off by default. |
 

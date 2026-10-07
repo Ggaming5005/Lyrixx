@@ -3,8 +3,7 @@
 import { openUrl } from '../actions.js';
 import { boundSwitch, boundText, group, issueSlot, pageHeader, row } from '../controls.js';
 import { formatTime, h, nextId, setText } from '../dom.js';
-import { icon } from '../icons.js';
-import { createCover } from '../now.js';
+import { icon, lyrixGlyph } from '../icons.js';
 import { discordOf, pendingLabel, pendingOf, positionAt, sharingSummary } from '../view.js';
 
 const PORTAL_URL = 'https://discord.com/developers/applications';
@@ -23,6 +22,7 @@ export function createConnectionsPage({ root, api, store, model, info }) {
   const enabledId = nextId('discord-on');
   const progressId = nextId('discord-progress');
   const clientLabelId = nextId('client-id');
+  const pictureLabelId = nextId('discord-picture');
 
   // Header with the live state ---------------------------------------------------
   const stateDot = h('span', { class: 'dot' });
@@ -41,7 +41,12 @@ export function createConnectionsPage({ root, api, store, model, info }) {
   );
 
   // What your profile shows -------------------------------------------------------
-  const art = createCover('activity-art');
+  // The picture: Lyrix's art (an uploaded image), or the image a link points to.
+  const pictureImg = h('img', { alt: '', decoding: 'async', draggable: 'false' });
+  pictureImg.addEventListener('error', () => {
+    pictureImg.hidden = true;
+  });
+  const picture = h('div', { class: 'activity-art' }, h('div', { class: 'cover-generated' }, lyrixGlyph()), pictureImg);
   const appName = h('span', { class: 'activity-name' });
   const details = h('div', { class: 'activity-details' });
   const state = h('div', { class: 'activity-state' });
@@ -58,7 +63,7 @@ export function createConnectionsPage({ root, api, store, model, info }) {
   const activity = h(
     'div',
     { class: 'activity', role: 'group', 'aria-label': 'What your profile shows' },
-    art.el,
+    picture,
     h(
       'div',
       { class: 'activity-body' },
@@ -76,14 +81,23 @@ export function createConnectionsPage({ root, api, store, model, info }) {
     mono: true,
   });
   clientField.setAttribute('inputmode', 'numeric');
+  const pictureField = boundText(model, 'discord.large_image', {
+    labelledBy: pictureLabelId,
+    placeholder: 'No picture',
+    mono: true,
+  });
   const useDefault = h(
     'button',
     {
       type: 'button',
       class: 'btn btn--ghost',
       onClick: () => {
-        model.set('discord.client_id', info.discordDefaultClientId, { now: true });
+        const lyrixPicture = model.getDefault('discord.large_image') ?? '';
+        model.set('discord.client_id', info.discordDefaultClientId);
+        model.set('discord.large_image', lyrixPicture);
+        model.flush();
         clientField.value = info.discordDefaultClientId;
+        pictureField.value = lyrixPicture;
       },
     },
     icon('reset'),
@@ -100,7 +114,7 @@ export function createConnectionsPage({ root, api, store, model, info }) {
         'div',
         { class: 'row-text' },
         h('div', { class: 'row-title', text: 'Use your own Discord application' }),
-        h('div', { class: 'row-desc', text: 'Show a name other than “Lyrix” after “Listening to”.' }),
+        h('div', { class: 'row-desc', text: 'Show your own name and picture instead of Lyrix’s.' }),
       ),
       h('span', { class: 'disclosure-chevron', 'aria-hidden': 'true' }, icon('chevronRight')),
     ),
@@ -128,6 +142,19 @@ export function createConnectionsPage({ root, api, store, model, info }) {
         ),
       ),
       issueSlot(model, 'discord.client_id', clientField),
+      h(
+        'p',
+        { class: 'prose' },
+        'The picture next to your lyrics is an image uploaded to that application under ',
+        h('b', { text: 'Rich Presence, Art Assets' }),
+        '. Type the image’s name here, or paste a link to a picture.',
+      ),
+      h(
+        'div',
+        { class: 'client-id-row' },
+        h('label', { class: 'visually-hidden', id: pictureLabelId, text: 'Picture name or link' }),
+        pictureField,
+      ),
     ),
   );
 
@@ -211,10 +238,16 @@ export function createConnectionsPage({ root, api, store, model, info }) {
     const ownId = model.get('discord.client_id');
     setText(appName, !ownId || ownId === info.discordDefaultClientId ? 'Lyrix' : 'your app');
     const now = view.now;
-    if (now) {
-      art.set(now.artwork, `${now.title}\n${now.artist}`);
-    } else {
-      art.set(null, 'Lyrix');
+    const image = String(model.get('discord.large_image') ?? '').trim();
+    const link = /^https:\/\//i.test(image) ? image : '';
+    picture.hidden = !image;
+    if (pictureImg.getAttribute('src') !== (link || null)) {
+      pictureImg.hidden = !link;
+      if (link) {
+        pictureImg.src = link;
+      } else {
+        pictureImg.removeAttribute('src');
+      }
     }
     setText(details, view.status?.text || pendingLabel(view) || 'Nothing to show right now');
     details.classList.toggle('is-muted', !view.status);
