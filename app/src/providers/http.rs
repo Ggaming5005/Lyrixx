@@ -26,7 +26,8 @@ pub(crate) fn client(
 
 /// GETs `url` with `params` and decodes the JSON body. Every status other
 /// than a success is an error. `what` names the request in errors, such as
-/// `NetEase /api/song/lyric`.
+/// `NetEase /api/song/lyric`; errors never include the URL, so a key sent
+/// as a parameter stays out of logs.
 pub(crate) async fn get_json<T: DeserializeOwned>(
     client: &reqwest::Client,
     url: &str,
@@ -38,6 +39,7 @@ pub(crate) async fn get_json<T: DeserializeOwned>(
         .query(params)
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("{what} request failed"))?;
     let status = response.status();
     if !status.is_success() {
@@ -48,7 +50,7 @@ pub(crate) async fn get_json<T: DeserializeOwned>(
 }
 
 /// Reads a response body of at most [`MAX_BODY_BYTES`]. `what` names the
-/// request in errors.
+/// request in errors, which never include the URL.
 pub(crate) async fn read_body(
     mut response: reqwest::Response,
     what: &str,
@@ -64,6 +66,7 @@ pub(crate) async fn read_body(
     while let Some(chunk) = response
         .chunk()
         .await
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("could not read the {what} response"))?
     {
         if body.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {

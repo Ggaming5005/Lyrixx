@@ -6,6 +6,7 @@ mod http;
 pub mod kugou;
 pub mod local;
 pub mod lrclib;
+pub mod musixmatch;
 pub mod netease;
 #[cfg(test)]
 mod test_server;
@@ -38,6 +39,12 @@ pub trait LyricsProvider: Send + Sync {
     fn is_local(&self) -> bool {
         false
     }
+
+    /// False when the provider's lyrics may not be kept: they are never
+    /// written to the cache, so the song is looked up again each time.
+    fn may_cache(&self) -> bool {
+        true
+    }
 }
 
 /// The outcome of a lookup.
@@ -66,7 +73,8 @@ pub enum Resolved {
 /// - Unsynced lyrics are returned with timings spread by
 ///   [`Lyrics::spread_evenly`] when the duration is known.
 /// - The final outcome of the other providers (found or not found) is written
-///   to the cache when one is set.
+///   to the cache when one is set, unless the lyrics come from a provider
+///   whose lyrics may not be kept ([`LyricsProvider::may_cache`]).
 /// - [`Lyrics::source`] is set to the provider's name.
 /// - Health: an `Err` increments the provider's consecutive error count;
 ///   `Ok` resets it; at [`MAX_CONSECUTIVE_ERRORS`] the provider is skipped until
@@ -211,8 +219,11 @@ impl ProviderChain {
             lyrics
         });
 
+        let may_cache = outcome
+            .as_ref()
+            .map_or(true, |lyrics| self.may_cache(&lyrics.source));
         if let Some(cache) = &self.cache {
-            if found_final || !incomplete {
+            if (found_final || !incomplete) && may_cache {
                 let entry = cache::CacheEntry {
                     lyrics: outcome.clone(),
                     fetched_at: unix_now_secs(),
@@ -249,6 +260,14 @@ impl ProviderChain {
             Some(lyrics) => Resolved::Found(lyrics),
             None => Resolved::NotFound,
         }
+    }
+
+    /// Whether lyrics from the provider named `source` may be cached.
+    fn may_cache(&self, source: &str) -> bool {
+        self.providers
+            .iter()
+            .find(|provider| provider.name() == source)
+            .map_or(true, |provider| provider.may_cache())
     }
 
     /// Names of the providers that are not your own files, in order.
@@ -404,6 +423,7 @@ mod tests {
         calls: Arc<Mutex<Vec<Track>>>,
         delay: Duration,
         local: bool,
+        keep: bool,
     }
 
     impl FakeProvider {
@@ -415,7 +435,14 @@ mod tests {
                 calls: Arc::new(Mutex::new(Vec::new())),
                 delay: Duration::ZERO,
                 local: false,
+                keep: true,
             }
+        }
+
+        /// Makes this provider's lyrics ones that may not be cached.
+        fn not_cached(mut self) -> Self {
+            self.keep = false;
+            self
         }
 
         /// Makes this provider stand for your own files.
@@ -447,6 +474,10 @@ mod tests {
 
         fn is_local(&self) -> bool {
             self.local
+        }
+
+        fn may_cache(&self) -> bool {
+            self.keep
         }
 
         async fn fetch(&self, track: &Track) -> anyhow::Result<Option<Lyrics>> {
@@ -1228,5 +1259,57 @@ mod tests {
         let chain = chain_with_cache(vec![lrclib], dir.path());
         assert_eq!(found(chain.resolve(&track()).await).source, "netease");
         assert_eq!(call_count(&lrclib_calls), 0);
+    }
+
+    #[tokio::test]
+    async fn lyrics_that_may_not_be_kept_are_looked_up_each_time() {
+        let normalized = crate::matcher::normalize_track(&track());
+        for lyrics in [synced("licensed"), plain(&["licensed"])] {
+            let dir = tempfile::tempdir().unwrap();
+            let musixmatch =
+                FakeProvider::new("musixmatch", Reply::Found(lyrics.clone())).not_cached();
+            let calls = musixmatch.calls();
+            let chain = chain_with_cache(
+                vec![
+                    FakeProvider::new("lrclib", Reply::Nothing),
+                    musixmatch,
+                    FakeProvider::new("netease", Reply::Nothing),
+                ],
+                dir.path(),
+            );
+            for _ in 0..2 {
+                let found = found(chain.resolve(&track()).await);
+                assert_eq!(found.source, "musixmatch");
+                assert_eq!(found.lines[0].text, "licensed");
+            }
+            assert_eq!(call_count(&calls), 2);
+            let cache = cache::LyricsCache::new(dir.path().to_path_buf());
+            assert!(cache.get(&normalized).await.is_none());
+        }
+
+        // What other providers find, and "not found", are still kept.
+        let dir = tempfile::tempdir().unwrap();
+        let chain = chain_with_cache(
+            vec![
+                FakeProvider::new("musixmatch", Reply::Found(plain(&["licensed"]))).not_cached(),
+                FakeProvider::new("netease", Reply::Found(synced("from netease"))),
+            ],
+            dir.path(),
+        );
+        assert_eq!(found(chain.resolve(&track()).await).source, "netease");
+        let cache = cache::LyricsCache::new(dir.path().to_path_buf());
+        let entry = cache.get(&normalized).await.unwrap();
+        assert_eq!(entry.lyrics.unwrap().source, "netease");
+
+        let dir = tempfile::tempdir().unwrap();
+        let chain = chain_with_cache(
+            vec![FakeProvider::new("musixmatch", Reply::Nothing).not_cached()],
+            dir.path(),
+        );
+        assert_eq!(chain.resolve(&track()).await, Resolved::NotFound);
+        let cache = cache::LyricsCache::new(dir.path().to_path_buf());
+        let entry = cache.get(&normalized).await.unwrap();
+        assert_eq!(entry.lyrics, None);
+        assert_eq!(entry.providers, vec!["musixmatch".to_string()]);
     }
 }

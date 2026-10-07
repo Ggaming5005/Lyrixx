@@ -27,6 +27,10 @@ const FRIENDLY = [
   [/^status\.no_lyrics_template is empty/, 'Empty: songs without lyrics would show as an empty status.'],
   [/discord\.client_id is empty/, 'Add an application ID, or Discord cannot connect.'],
   [/^No target is enabled/, 'Discord is off, so your lyrics are not shown anywhere.'],
+  [
+    /^lyrics\.musixmatch_key does not look like/,
+    'This doesn’t look like a Musixmatch API key (32 letters and digits), so Musixmatch will probably refuse it.',
+  ],
 ];
 
 function friendly(issue) {

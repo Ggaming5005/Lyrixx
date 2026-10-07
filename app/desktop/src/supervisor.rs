@@ -10,12 +10,13 @@ use crate::actions::{self, OffsetChange};
 use crate::paths::Paths;
 use crate::view::View;
 use anyhow::Context;
-use lyrix::config::{Config, Severity, BAN_WARNING};
+use lyrix::config::{Config, Secret, Severity, BAN_WARNING};
 use lyrix::engine::Engine;
 use lyrix::providers::cache::LyricsCache;
 use lyrix::providers::kugou::KugouProvider;
 use lyrix::providers::local::LocalLrcProvider;
 use lyrix::providers::lrclib::LrclibProvider;
+use lyrix::providers::musixmatch::MusixmatchProvider;
 use lyrix::providers::netease::NeteaseProvider;
 use lyrix::providers::{LyricsProvider, ProviderChain};
 use lyrix::targets::discord_rpc::DiscordRpcTarget;
@@ -303,14 +304,17 @@ fn targets(config: &Config) -> Vec<Box<dyn StatusTarget>> {
 
 /// Where lyrics are looked up, in order, decided from the settings alone.
 /// The same as the `lyrix` command's: your own files first, then LRCLIB,
-/// NetEase and Kugou when each is on, with the cache when it is on.
+/// Musixmatch (with your key), NetEase and Kugou when each is on, with the
+/// cache when it is on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LyricsPlan {
     /// Your own `.lrc` / `.txt` files.
     pub local_dir: PathBuf,
     /// LRCLIB server, without a trailing slash, when LRCLIB is on.
     pub lrclib_url: Option<String>,
-    /// NetEase Cloud Music, after LRCLIB.
+    /// Your own Musixmatch API key, when one is set: Musixmatch after LRCLIB.
+    pub musixmatch_key: Option<Secret>,
+    /// NetEase Cloud Music, after Musixmatch.
     pub netease: bool,
     /// Kugou, after NetEase.
     pub kugou: bool,
@@ -331,17 +335,22 @@ impl LyricsPlan {
         Self {
             local_dir: config.lyrics_dir(),
             lrclib_url,
+            musixmatch_key: config.lyrics.musixmatch_key.trimmed().map(Secret::new),
             netease: config.lyrics.netease,
             kugou: config.lyrics.kugou,
             cache_dir: config.lyrics.cache.then_some(cache_dir),
         }
     }
 
-    /// `local, lrclib (<url>), netease, kugou, cache`, for the log.
+    /// `local, lrclib (<url>), musixmatch, netease, kugou, cache`, for the
+    /// log, never with the Musixmatch key.
     pub fn describe(&self) -> String {
         let mut parts = vec!["local".to_string()];
         if let Some(url) = &self.lrclib_url {
             parts.push(format!("lrclib ({url})"));
+        }
+        if self.musixmatch_key.is_some() {
+            parts.push("musixmatch".to_string());
         }
         if self.netease {
             parts.push("netease".to_string());
@@ -362,6 +371,9 @@ impl LyricsPlan {
             let lrclib = LrclibProvider::new(url.clone())
                 .with_context(|| format!("could not set up LRCLIB at {url}"))?;
             providers.push(Box::new(lrclib));
+        }
+        if let Some(key) = &self.musixmatch_key {
+            providers.push(Box::new(MusixmatchProvider::new(key.expose())?));
         }
         if self.netease {
             providers.push(Box::new(NeteaseProvider::new()?));
@@ -495,6 +507,7 @@ mod tests {
             LyricsPlan {
                 local_dir: PathBuf::from("/mine"),
                 lrclib_url: Some("https://lrclib.example".into()),
+                musixmatch_key: None,
                 netease: true,
                 kugou: true,
                 cache_dir: Some(cache.clone()),
@@ -508,8 +521,26 @@ mod tests {
         let names: Vec<&str> = chain.health().into_iter().map(|(name, _)| name).collect();
         assert_eq!(names, vec!["local", "lrclib", "netease", "kugou"]);
 
+        let key = "0123456789abcdef0123456789abcdef";
+        config.lyrics.musixmatch_key = Secret::new(format!("{key}\n"));
+        let plan = LyricsPlan::from_config(&config, cache.clone());
+        assert_eq!(plan.musixmatch_key, Some(Secret::new(key)));
+        assert_eq!(
+            plan.describe(),
+            "local, lrclib (https://lrclib.example), musixmatch, netease, kugou, cache"
+        );
+        assert!(!format!("{plan:?}").contains(key));
+        let chain = plan.build().unwrap();
+        let names: Vec<&str> = chain.health().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(
+            names,
+            vec!["local", "lrclib", "musixmatch", "netease", "kugou"]
+        );
+
+        config.lyrics.musixmatch_key = Secret::new(" ");
         config.lyrics.netease = false;
         let plan = LyricsPlan::from_config(&config, cache.clone());
+        assert_eq!(plan.musixmatch_key, None);
         assert_eq!(
             plan.describe(),
             "local, lrclib (https://lrclib.example), kugou, cache"

@@ -88,6 +88,42 @@ pub struct LyricsConfig {
     pub netease: bool,
     /// Use Kugou after NetEase (no account; not an official API).
     pub kugou: bool,
+    /// Your own Musixmatch API key, from developer.musixmatch.com. Musixmatch
+    /// is asked after LRCLIB only when this is set. It stays in this file.
+    pub musixmatch_key: Secret,
+}
+
+/// Text such as an API key that is kept out of logs: `{:?}` shows
+/// `"(hidden)"` instead of it. It is saved and sent to the window as plain
+/// text.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// The text itself, for the one place that needs it.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    /// The text without the spaces around it, or `None` when that is empty.
+    pub fn trimmed(&self) -> Option<&str> {
+        Some(self.0.trim()).filter(|text| !text.is_empty())
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            f.write_str("\"\"")
+        } else {
+            f.write_str("\"(hidden)\"")
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -185,6 +221,7 @@ impl Default for LyricsConfig {
             lrclib_url: "https://lrclib.net".into(),
             netease: true,
             kugou: true,
+            musixmatch_key: Secret::default(),
         }
     }
 }
@@ -276,6 +313,8 @@ impl Config {
     /// - Warning: an Advanced option is on and accepted (message includes [`BAN_WARNING`]).
     /// - Warning: no target enabled at all.
     /// - Warning: an empty `line_template` or `no_lyrics_template`.
+    /// - Warning: a `lyrics.musixmatch_key` that is not 32 letters and digits,
+    ///   the form of the keys developer.musixmatch.com gives out.
     ///
     /// Issues come in the order above: one per Advanced option that is on and
     /// one per empty template. Text made only of whitespace counts as empty.
@@ -333,12 +372,28 @@ impl Config {
             ));
         }
 
+        if let Some(key) = self.lyrics.musixmatch_key.trimmed() {
+            if !looks_like_musixmatch_key(key) {
+                issues.push(ConfigIssue::warning(
+                    "lyrics.musixmatch_key does not look like a Musixmatch API key, which is 32 \
+                     letters and digits, so Musixmatch will probably not accept it."
+                        .to_string(),
+                ));
+            }
+        }
+
         issues
     }
 }
 
 /// Reading the player more often than this is an error in [`Config::validate`].
 const MIN_POLL_INTERVAL_MS: u64 = 100;
+
+/// True for 32 letters and digits: the keys developer.musixmatch.com gives
+/// out are 32 hexadecimal characters.
+fn looks_like_musixmatch_key(key: &str) -> bool {
+    key.len() == 32 && key.chars().all(|c| c.is_ascii_alphanumeric())
+}
 
 impl ConfigIssue {
     fn error(message: String) -> Self {
@@ -471,11 +526,12 @@ fn create_temp_file(
             TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         let temp_path = dir.join(temp_name);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-        {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // The settings can hold an API key, so on Unix only you can read them.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        match options.open(&temp_path) {
             Ok(file) => return Ok((file, temp_path)),
             Err(e)
                 if e.kind() == std::io::ErrorKind::AlreadyExists
@@ -581,6 +637,8 @@ mod tests {
         assert_eq!(c.lyrics.lrclib_url, "https://lrclib.net");
         assert!(c.lyrics.netease);
         assert!(c.lyrics.kugou);
+        assert_eq!(c.lyrics.musixmatch_key, Secret::default());
+        assert_eq!(c.lyrics.musixmatch_key.trimmed(), None);
         assert!(c.discord.enabled);
         assert_eq!(c.discord.client_id, DEFAULT_DISCORD_CLIENT_ID);
         assert_eq!(c.discord.min_interval_ms, 4_500);
@@ -621,6 +679,7 @@ mod tests {
         c.lyrics.lrclib_url = "http://localhost:3000".into();
         c.lyrics.netease = false;
         c.lyrics.kugou = false;
+        c.lyrics.musixmatch_key = Secret::new("0123456789abcdef0123456789abcdef");
         c.sources.preferred_apps = vec!["spotify".into()];
         c.sources.macos_adapter_dir = Some(PathBuf::from("/opt/mediaremote-adapter"));
         c.discord.enabled = false;
@@ -843,6 +902,7 @@ mod tests {
             assert!(text.contains(section), "missing {section} in:\n{text}");
         }
         assert!(text.contains("poll_interval_ms = 500"));
+        assert!(text.contains("musixmatch_key = \"\""));
     }
 
     #[test]
@@ -887,6 +947,19 @@ mod tests {
         assert!(err.to_string().contains(&target.display().to_string()));
         assert_eq!(files_in(dir.path()), vec!["config.toml".to_string()]);
         assert!(target.join("keep").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_files_are_readable_only_by_you() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        Config::default().save(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]
@@ -1192,6 +1265,57 @@ mod tests {
         c.status.line_template = String::new();
         c.status.no_lyrics_template = String::new();
         assert_eq!(c.validate().len(), 2);
+    }
+
+    #[test]
+    fn a_musixmatch_key_that_is_not_a_developer_key_warns() {
+        for key in [
+            "",
+            "   ",
+            "0123456789abcdef0123456789ABCDEF",
+            " 0123456789abcdef0123456789abcdef ",
+        ] {
+            let mut c = clean_config();
+            c.lyrics.musixmatch_key = Secret::new(key);
+            assert!(c.validate().is_empty(), "{key:?}");
+        }
+        for key in [
+            "0123456789abcdef",
+            "0123456789abcdef0123456789abcdef0",
+            "0123456789abcdef-0123456789abcde",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123",
+        ] {
+            let mut c = clean_config();
+            c.lyrics.musixmatch_key = Secret::new(key);
+            let issues = c.validate();
+            assert_eq!(issues.len(), 1, "{issues:?}");
+            assert_eq!(issues[0].severity, Severity::Warning);
+            assert!(issues[0].message.starts_with("lyrics.musixmatch_key "));
+            assert!(!issues[0].message.contains(key));
+        }
+    }
+
+    #[test]
+    fn secrets_are_hidden_in_debug_output_but_saved() {
+        let mut c = Config::default();
+        c.lyrics.musixmatch_key = Secret::new("0123456789abcdef0123456789abcdef");
+        let debug = format!("{c:?}");
+        assert!(!debug.contains("0123456789abcdef"), "{debug}");
+        assert!(debug.contains("musixmatch_key: \"(hidden)\""), "{debug}");
+        assert_eq!(format!("{:?}", Secret::default()), "\"\"");
+
+        let text = toml::to_string_pretty(&c).unwrap();
+        assert!(text.contains("musixmatch_key = \"0123456789abcdef0123456789abcdef\""));
+        let json = serde_json::to_value(&c).unwrap();
+        assert_eq!(
+            json["lyrics"]["musixmatch_key"],
+            "0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            c.lyrics.musixmatch_key.expose(),
+            "0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(Secret::new(" key ").trimmed(), Some("key"));
     }
 
     #[test]

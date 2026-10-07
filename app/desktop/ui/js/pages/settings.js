@@ -27,7 +27,8 @@ const SAMPLE = {
 };
 
 /** Settings whose issues show next to their own field (here or on another page). */
-const SHOWN_BY_FIELDS = /^(status\.line_template|status\.no_lyrics_template|discord\.client_id|advanced\.)/;
+const SHOWN_BY_FIELDS =
+  /^(status\.line_template|status\.no_lyrics_template|discord\.client_id|lyrics\.musixmatch_key|advanced\.)/;
 
 /**
  * The values a preview uses: the song playing now, or a sample. Its lyrics
@@ -360,7 +361,7 @@ export function createSettingsPage({ root, api, store, model, info }) {
     ),
     row({
       lead: 'globe',
-      title: 'Lyrics from your own files, LRCLIB, NetEase and Kugou',
+      title: 'Lyrics from your own files, LRCLIB, Musixmatch, NetEase and Kugou',
       desc: 'Lyrix runs on your computer: no account, no server, no audio recording.',
     }),
   );

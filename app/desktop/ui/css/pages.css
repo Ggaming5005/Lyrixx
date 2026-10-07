@@ -308,6 +308,25 @@
   transform-origin: left;
 }
 
+.key-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.key-row .field {
+  min-width: 0;
+  max-width: 360px;
+  flex: 1;
+}
+
+.key-note {
+  margin-top: var(--sp-2);
+  color: var(--text-3);
+  font-size: var(--fs-caption);
+  line-height: 1.45;
+}
+
 .client-id-row {
   display: flex;
   flex-wrap: wrap;

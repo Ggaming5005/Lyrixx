@@ -1,8 +1,8 @@
 // Checks how the window behaves over time, with the demo backend
 // (ui/js/mock.js and its `window.lyrixDemo`): restarts after a save, the
 // window closing with a change waiting, settings edited in the file, the
-// status preview, the Discord picture, lyrics with no timing and the modal
-// without showModal().
+// status preview, the Discord picture, the Musixmatch key, lyrics with no
+// timing and the modal without showModal().
 //
 // screenshots.mjs runs `checkFlows` after the screenshots; each check opens
 // its own page and returns what went wrong, as readable lines.
@@ -226,6 +226,37 @@ const FLOWS = {
     );
   },
 
+  /** The Musixmatch key is typed hidden, can be shown, and is checked. */
+  async 'the Musixmatch key'(page, check) {
+    const field = page.getByLabel('Musixmatch API key');
+    check((await field.getAttribute('type')) === 'password', 'the key is not hidden while typed');
+    const warning = page.locator('#page-lyrics .issue');
+
+    await field.fill('not-a-developer-key');
+    await field.press('Enter');
+    await warning.first().waitFor({ timeout: 3000 }).catch(() => {});
+    const text = (await warning.allTextContents()).join(' ');
+    check(text.includes('doesn’t look like a Musixmatch API key'), `no warning for a key of the wrong form: "${text}"`);
+    check((await field.getAttribute('aria-invalid')) === 'false', 'a warning marked the key as an error');
+
+    await page.getByRole('button', { name: 'Show the key' }).click();
+    check((await field.getAttribute('type')) === 'text', '"Show" did not show the key');
+    await page.getByRole('button', { name: 'Hide the key' }).click();
+    check((await field.getAttribute('type')) === 'password', '"Hide" did not hide the key');
+
+    // The save restarts the demo engine; the next one waits for that.
+    await page.waitForTimeout(1600);
+    await field.fill('0123456789abcdef0123456789abcdef');
+    await field.press('Enter');
+    await warning.first().waitFor({ state: 'detached', timeout: 3000 }).catch(() => {});
+    check((await warning.count()) === 0, 'the warning stayed for a key of the right form');
+    const sent = await saved(page);
+    check(
+      sent.length === 2 && sent[1].lyrics.musixmatch_key === '0123456789abcdef0123456789abcdef',
+      `the key was not saved as typed: ${JSON.stringify(sent.map((c) => c.lyrics.musixmatch_key))}`,
+    );
+  },
+
   /** Plain lyrics with no timing: listed, none current, no estimate. */
   async 'lyrics with no timing'(page, check) {
     const state = await page.evaluate(() => ({
@@ -290,6 +321,7 @@ const RUNS = [
   ['settings reload on focus', 'scenario=playing&page=settings'],
   ['previews like the engine', 'scenario=playing&page=settings'],
   ['the Discord picture follows its setting', 'scenario=playing&page=connections'],
+  ['the Musixmatch key', 'scenario=playing&page=lyrics'],
   ['lyrics with no timing', 'scenario=untimed'],
   ['the modal', 'scenario=playing&page=advanced', { label: 'dialog' }],
   [

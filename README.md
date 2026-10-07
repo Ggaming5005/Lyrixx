@@ -20,7 +20,7 @@
 ## Why Lyrix
 
 - **Works with almost any player.** Spotify, Apple Music, YouTube Music in the browser, Tidal, Deezer, foobar2000, VLC… If your computer's media controls can see it, Lyrix can too. No account to connect.
-- **Real lyrics, perfectly timed.** Synced lyrics come from your own `.lrc` files, [LRCLIB](https://lrclib.net) (a free and open lyrics database), or, when LRCLIB doesn't have the song, NetEase Cloud Music and Kugou. If a song has no lyrics anywhere, your status shows the song name instead.
+- **Real lyrics, perfectly timed.** Synced lyrics come from your own `.lrc` files, [LRCLIB](https://lrclib.net) (a free and open lyrics database), or, when LRCLIB doesn't have the song, Musixmatch (with your own API key), NetEase Cloud Music and Kugou. If a song has no lyrics anywhere, your status shows the song name instead.
 - **Zero setup for Discord.** Open Lyrix, keep Discord running, and your profile shows **Listening to Lyrix** with the Lyrix picture, the current line and a progress bar. No token, no login.
 - **Light.** A small native app that sits in your tray. The window opens only when you want it, and nothing runs on a server.
 - **Yours to tune.** Status templates, a per-song timing nudge, a profanity filter, hidden apps and artists, and a "song only" mode for your work account.
@@ -63,6 +63,7 @@ flowchart LR
     F["Your .lrc / .txt files"] --> L
     C["Lyrics saved on<br/>this computer"] --> L
     R["LRCLIB<br/>open lyrics database"] --> L
+    M["Musixmatch<br/>with your own API key"] --> L
     N["NetEase · Kugou<br/>when LRCLIB has nothing"] --> L
     L -->|current line| D["Discord<br/>Listening to Lyrix"]
 ```
@@ -71,7 +72,7 @@ flowchart LR
    - Windows: the system media sessions (every app in the volume/media flyout).
    - Linux: MPRIS, which nearly every player and browser supports.
    - macOS: Spotify and Apple Music. For every other app in the Now Playing widget, install [mediaremote-adapter](https://github.com/ungive/mediaremote-adapter) and set `sources.macos_adapter_dir`.
-2. **Lyrics.** Lyrix looks in this order: your own files, lyrics it saved before, LRCLIB, then NetEase Cloud Music and Kugou, two big catalogs (especially for Chinese, Japanese and Korean songs) that need no account. They aren't official services, so they may stop answering one day; each has its own switch on the Lyrics page. Credit lines such as "Lyrics by" are left out, and lyrics without timing are spread across the song and marked as estimated.
+2. **Lyrics.** Lyrix looks in this order: your own files, lyrics it saved before, LRCLIB, Musixmatch if you [added your key](#musixmatch-with-your-own-key), then NetEase Cloud Music and Kugou, two big catalogs (especially for Chinese, Japanese and Korean songs) that need no account. They aren't official services, so they may stop answering one day; each has its own switch on the Lyrics page. Credit lines such as "Lyrics by" are left out, and lyrics without timing are spread across the song and marked as estimated.
 3. **Your status.** Lyrix keeps its own clock between readings, picks the line for this exact moment, and updates Discord no faster than Discord allows: at most 5 times every 20 seconds. When lines come faster than that, Lyrix skips some, and when a new line is about to start it waits a moment for it, so Discord shows the line being sung rather than one about to end.
 
 ## Your own lyrics
@@ -130,6 +131,14 @@ Yes. Everything on by default uses Discord's official Rich Presence, the same fe
 
 </details>
 
+## Musixmatch with your own key
+
+Musixmatch has lyrics for most songs, and Lyrix can ask it through its official API with your own key. Create one at [developer.musixmatch.com](https://developer.musixmatch.com), then paste it under **Lyrics → Musixmatch** in the app. The key stays in Lyrix's settings on your computer.
+
+- Timed lyrics need one of Musixmatch's paid plans. The free plan sends only part of each song's words, without timing, and Lyrix doesn't use those, so a free key finds no lyrics.
+- Only keys from developer.musixmatch.com work. Tokens taken from Musixmatch's own apps don't.
+- Lyrix doesn't save Musixmatch's lyrics, so it asks again each time a song plays, and every lookup counts toward your plan's limit. For each song it gets lyrics for, it opens Musixmatch's tracking link, which is how Musixmatch counts views.
+
 ## Advanced mode
 
 > [!CAUTION]
@@ -154,7 +163,7 @@ cargo run -p lyrix -- now      # the command
 
 ## Credits
 
-- Lyrics from [LRCLIB](https://lrclib.net), a free, open, community lyrics database, and from [NetEase Cloud Music](https://music.163.com) and [Kugou](https://www.kugou.com).
+- Lyrics from [LRCLIB](https://lrclib.net), a free, open, community lyrics database, from [NetEase Cloud Music](https://music.163.com) and [Kugou](https://www.kugou.com), and from [Musixmatch](https://www.musixmatch.com) with your own API key.
 - Inspired by [BlueCatSoftware/Lyrix](https://github.com/BlueCatSoftware/Lyrix).
 - Built with [Rust](https://www.rust-lang.org) and [Tauri](https://tauri.app).
 

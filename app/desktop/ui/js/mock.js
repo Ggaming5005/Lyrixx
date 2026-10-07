@@ -67,6 +67,7 @@ function defaultConfig() {
       lrclib_url: 'https://lrclib.net',
       netease: true,
       kugou: true,
+      musixmatch_key: '',
     },
     sources: { preferred_apps: [], macos_adapter_dir: null },
     discord: {
@@ -117,6 +118,13 @@ function validate(config) {
   }
   if (!config.status.no_lyrics_template.trim()) {
     warning('status.no_lyrics_template is empty, so songs without lyrics would show as an empty status.');
+  }
+  const key = String(config.lyrics.musixmatch_key ?? '').trim();
+  if (key && !/^[A-Za-z0-9]{32}$/.test(key)) {
+    warning(
+      'lyrics.musixmatch_key does not look like a Musixmatch API key, which is 32 letters and digits, ' +
+        'so Musixmatch will probably not accept it.',
+    );
   }
   return issues;
 }

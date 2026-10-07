@@ -12,7 +12,7 @@
 //!     (without --artist/--title: the song playing now)
 //! config init [--force]    Write a config file with every setting and its default.
 //! config path              Print where the config file is.
-//! config show              Print the settings in use.
+//! config show              Print the settings in use (the Musixmatch key hidden).
 //! config check             Report problems with the settings.
 //! pause / resume           Clear the status and stop / start updating a running lyrix.
 //! offset <ms>              Nudge the song playing now: positive shows lines later.
@@ -26,11 +26,12 @@
 
 use anyhow::{bail, Context};
 use clap::{ArgAction, Args, Parser, Subcommand};
-use lyrix::config::{Config, ConfigIssue, Offsets, Severity, BAN_WARNING};
+use lyrix::config::{Config, ConfigIssue, Offsets, Secret, Severity, BAN_WARNING};
 use lyrix::providers::cache::LyricsCache;
 use lyrix::providers::kugou::KugouProvider;
 use lyrix::providers::local::LocalLrcProvider;
 use lyrix::providers::lrclib::LrclibProvider;
+use lyrix::providers::musixmatch::MusixmatchProvider;
 use lyrix::providers::netease::NeteaseProvider;
 use lyrix::providers::{LyricsProvider, ProviderChain, Resolved};
 use lyrix::sources::NowPlayingSource;
@@ -132,7 +133,7 @@ enum ConfigCommand {
     },
     /// Print where the config file is.
     Path,
-    /// Print the settings in use.
+    /// Print the settings in use, with the Musixmatch key hidden.
     Show,
     /// Report problems with the settings.
     Check,
@@ -435,7 +436,9 @@ struct ProviderPlan {
     local_dir: PathBuf,
     /// LRCLIB server, without a trailing slash, when LRCLIB is on.
     lrclib_url: Option<String>,
-    /// NetEase Cloud Music, after LRCLIB.
+    /// Your own Musixmatch API key, when one is set: Musixmatch after LRCLIB.
+    musixmatch_key: Option<Secret>,
+    /// NetEase Cloud Music, after Musixmatch.
     netease: bool,
     /// Kugou, after NetEase.
     kugou: bool,
@@ -460,13 +463,15 @@ impl ProviderPlan {
         Self {
             local_dir: config.lyrics_dir(),
             lrclib_url,
+            musixmatch_key: config.lyrics.musixmatch_key.trimmed().map(Secret::new),
             netease: config.lyrics.netease,
             kugou: config.lyrics.kugou,
             cache_dir: config.lyrics.cache.then_some(cache_dir),
         }
     }
 
-    /// `local (<dir>), lrclib (<url>), netease, kugou, cache`.
+    /// `local (<dir>), lrclib (<url>), musixmatch, netease, kugou, cache`,
+    /// never with the Musixmatch key.
     fn describe(&self) -> String {
         let mut parts = vec![format!(
             "local ({})",
@@ -474,6 +479,9 @@ impl ProviderPlan {
         )];
         if let Some(url) = &self.lrclib_url {
             parts.push(format!("lrclib ({})", one_line(url)));
+        }
+        if self.musixmatch_key.is_some() {
+            parts.push("musixmatch".to_string());
         }
         if self.netease {
             parts.push("netease".to_string());
@@ -487,8 +495,8 @@ impl ProviderPlan {
         parts.join(", ")
     }
 
-    /// Builds the chain: local files, then LRCLIB, NetEase and Kugou when
-    /// each is on, with the cache when on.
+    /// Builds the chain: local files, then LRCLIB, Musixmatch, NetEase and
+    /// Kugou when each is on, with the cache when on.
     fn build(&self) -> anyhow::Result<ProviderChain> {
         let mut providers: Vec<Box<dyn LyricsProvider>> =
             vec![Box::new(LocalLrcProvider::new(self.local_dir.clone()))];
@@ -496,6 +504,9 @@ impl ProviderPlan {
             let lrclib = LrclibProvider::new(url.clone())
                 .with_context(|| format!("could not set up LRCLIB at {url}"))?;
             providers.push(Box::new(lrclib));
+        }
+        if let Some(key) = &self.musixmatch_key {
+            providers.push(Box::new(MusixmatchProvider::new(key.expose())?));
         }
         if self.netease {
             providers.push(Box::new(NeteaseProvider::new()?));
@@ -901,7 +912,10 @@ fn section_comment(section: &str) -> Option<String> {
         "privacy" => "# Players to ignore (matched inside the app id, e.g. \"chrome\"), artists\n\
                       # to never show, and title_only to show the song but never lyric lines.",
         "lyrics" => "# Where lyrics come from: your own .lrc/.txt files first, then LRCLIB\n\
-                     # (free, no account). Found lyrics are cached on disk when cache = true.",
+                     # (free, no account), Musixmatch when musixmatch_key holds your own API key\n\
+                     # from developer.musixmatch.com, then NetEase and Kugou (no account; not\n\
+                     # official services). Found lyrics are cached on disk when cache = true,\n\
+                     # except Musixmatch's.",
         "sources" => "# Players to prefer when several are playing (matched like blocked_apps).",
         "discord" => "# Discord Rich Presence (needs the Discord desktop app). client_id is the\n\
                       # Discord application to show as, Lyrix's own by default. Use the id of your\n\
@@ -1068,9 +1082,18 @@ fn cmd_config_show(config_path: &Path) -> anyhow::Result<u8> {
             config_path.display()
         ));
     }
-    let text = toml::to_string_pretty(&config).context("could not write the settings as TOML")?;
-    print_out(text.trim_end())?;
+    print_out(&shown_config_text(&config)?)?;
     Ok(0)
+}
+
+/// The settings as TOML for `config show`, with the Musixmatch key hidden.
+fn shown_config_text(config: &Config) -> anyhow::Result<String> {
+    let mut shown = config.clone();
+    if shown.lyrics.musixmatch_key.trimmed().is_some() {
+        shown.lyrics.musixmatch_key = Secret::new("(hidden)");
+    }
+    let text = toml::to_string_pretty(&shown).context("could not write the settings as TOML")?;
+    Ok(text.trim_end().to_string())
 }
 
 fn cmd_config_check(config_path: &Path) -> anyhow::Result<u8> {
@@ -1860,6 +1883,7 @@ mod tests {
         let plan = ProviderPlan::from_config(&config, PathBuf::from("/c/lyrics"));
         assert_eq!(plan.local_dir, config.lyrics_dir());
         assert_eq!(plan.lrclib_url.as_deref(), Some("https://lrclib.net"));
+        assert_eq!(plan.musixmatch_key, None);
         assert!(plan.netease);
         assert!(plan.kugou);
         assert_eq!(plan.cache_dir, Some(PathBuf::from("/c/lyrics")));
@@ -1888,6 +1912,7 @@ mod tests {
             ProviderPlan {
                 local_dir: PathBuf::from("/music/lrc"),
                 lrclib_url: None,
+                musixmatch_key: None,
                 netease: false,
                 kugou: false,
                 cache_dir: None,
@@ -1914,6 +1939,35 @@ mod tests {
         let chain = plan.build().unwrap();
         let names: Vec<&str> = chain.health().into_iter().map(|(name, _)| name).collect();
         assert_eq!(names, vec!["local", "kugou"]);
+    }
+
+    #[test]
+    fn musixmatch_is_asked_after_lrclib_only_with_a_key() {
+        let mut config = Config::default();
+        for blank in ["", "  "] {
+            config.lyrics.musixmatch_key = Secret::new(blank);
+            let plan = ProviderPlan::from_config(&config, PathBuf::from("/c"));
+            assert_eq!(plan.musixmatch_key, None);
+            assert!(!plan.describe().contains("musixmatch"));
+        }
+
+        let key = "0123456789abcdef0123456789abcdef";
+        config.lyrics.musixmatch_key = Secret::new(format!(" {key} "));
+        let plan = ProviderPlan::from_config(&config, PathBuf::from("/c"));
+        assert_eq!(plan.musixmatch_key, Some(Secret::new(key)));
+        let text = plan.describe();
+        assert!(
+            text.ends_with("lrclib (https://lrclib.net), musixmatch, netease, kugou, cache"),
+            "{text}"
+        );
+        assert!(!text.contains(key), "{text}");
+        assert!(!format!("{plan:?}").contains(key));
+        let chain = plan.build().unwrap();
+        let names: Vec<&str> = chain.health().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(
+            names,
+            vec!["local", "lrclib", "musixmatch", "netease", "kugou"]
+        );
     }
 
     #[test]
@@ -2027,6 +2081,7 @@ mod tests {
         let plan = ProviderPlan {
             local_dir: PathBuf::from("/music/lrc"),
             lrclib_url: Some("https://lrclib.net".into()),
+            musixmatch_key: None,
             netease: true,
             kugou: false,
             cache_dir: Some(PathBuf::from("/c")),
@@ -2049,6 +2104,19 @@ mod tests {
         let parsed: Config = toml::from_str(&text).unwrap();
         assert_eq!(parsed, Config::default());
         assert!(text.starts_with("# Lyrix settings."));
+    }
+
+    #[test]
+    fn config_show_hides_the_musixmatch_key() {
+        let mut config = Config::default();
+        let text = shown_config_text(&config).unwrap();
+        assert!(text.contains("musixmatch_key = \"\""), "{text}");
+        assert_eq!(toml::from_str::<Config>(&text).unwrap(), config);
+
+        config.lyrics.musixmatch_key = Secret::new("0123456789abcdef0123456789abcdef");
+        let text = shown_config_text(&config).unwrap();
+        assert!(text.contains("musixmatch_key = \"(hidden)\""), "{text}");
+        assert!(!text.contains("0123456789abcdef"), "{text}");
     }
 
     #[test]

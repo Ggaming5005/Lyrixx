@@ -168,6 +168,8 @@ export function sourceName(source) {
   switch (source) {
     case 'lrclib':
       return 'LRCLIB';
+    case 'musixmatch':
+      return 'Musixmatch';
     case 'netease':
       return 'NetEase';
     case 'kugou':

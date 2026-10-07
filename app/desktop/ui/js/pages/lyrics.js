@@ -2,7 +2,7 @@
 // your own files.
 
 import { openFolder, openUrl } from '../actions.js';
-import { boundSwitch, group, pageHeader, row } from '../controls.js';
+import { boundSwitch, boundText, group, issueSlot, pageHeader, row } from '../controls.js';
 import { attempt, h, nextId, toast } from '../dom.js';
 import { icon } from '../icons.js';
 
@@ -54,6 +54,58 @@ function sourceRow({ api, model, step, key, title, desc, url, label }) {
   });
 }
 
+/** Musixmatch, asked only with your own API key, which is typed here. */
+function musixmatchRow({ api, model, step }) {
+  const keyLabelId = nextId('musixmatch-key');
+  const keyField = boundText(model, 'lyrics.musixmatch_key', {
+    labelledBy: keyLabelId,
+    placeholder: 'Paste your API key',
+    mono: true,
+    secret: true,
+  });
+  const showKey = h('button', {
+    type: 'button',
+    class: 'btn btn--ghost',
+    'aria-label': 'Show the key',
+    text: 'Show',
+    onClick: () => {
+      const hidden = keyField.type === 'password';
+      keyField.type = hidden ? 'text' : 'password';
+      showKey.textContent = hidden ? 'Hide' : 'Show';
+      showKey.setAttribute('aria-label', hidden ? 'Hide the key' : 'Show the key');
+    },
+  });
+  return row({
+    lead: stepNumber(step),
+    title: 'Musixmatch',
+    desc: [
+      'Asked only when you add your own API key. Timed lyrics need a paid Musixmatch plan: the free plan sends part of each song, which Lyrix doesn’t use. ',
+      h(
+        'button',
+        { type: 'button', class: 'link-btn', onClick: () => openUrl(api, 'https://developer.musixmatch.com') },
+        'Get a key',
+        icon('external'),
+      ),
+    ],
+    below: h(
+      'div',
+      {},
+      h(
+        'div',
+        { class: 'key-row' },
+        h('label', { class: 'visually-hidden', id: keyLabelId, text: 'Musixmatch API key' }),
+        keyField,
+        showKey,
+      ),
+      issueSlot(model, 'lyrics.musixmatch_key', keyField),
+      h('p', {
+        class: 'key-note',
+        text: 'Your key stays in Lyrix’s settings on this computer. Lyrics from Musixmatch aren’t saved, so it is asked each time a song plays.',
+      }),
+    ),
+  });
+}
+
 export function createLyricsPage({ root, api, model }) {
   const cacheId = nextId('cache');
 
@@ -87,10 +139,12 @@ export function createLyricsPage({ root, api, model }) {
     label: 'lrclib.net',
   });
 
+  const musixmatch = musixmatchRow({ api, model, step: 3 });
+
   const netease = sourceRow({
     api,
     model,
-    step: 3,
+    step: 4,
     key: 'netease',
     title: 'NetEase Cloud Music',
     desc: 'A huge catalog of timed lyrics in many languages, no account needed. It isn’t an official service, so it may stop answering.',
@@ -101,7 +155,7 @@ export function createLyricsPage({ root, api, model }) {
   const kugou = sourceRow({
     api,
     model,
-    step: 4,
+    step: 5,
     key: 'kugou',
     title: 'Kugou',
     desc: 'Strongest for Chinese and other Asian songs, no account needed. It isn’t an official service either.',
@@ -143,7 +197,15 @@ export function createLyricsPage({ root, api, model }) {
       'div',
       { class: 'page-inner' },
       pageHeader('Lyrics', 'Lyrix finds lyrics on its own. This is where it looks, in order.'),
-      group({ title: 'Where lyrics come from', icon: 'search' }, yourFiles, lrclib, netease, kugou, flowEnd),
+      group(
+        { title: 'Where lyrics come from', icon: 'search' },
+        yourFiles,
+        lrclib,
+        musixmatch,
+        netease,
+        kugou,
+        flowEnd,
+      ),
       group(
         {
           title: 'Saved lyrics',

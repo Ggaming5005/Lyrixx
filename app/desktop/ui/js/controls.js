@@ -115,12 +115,17 @@ export function issueSlot(model, path, field) {
 
 /**
  * A text field bound to a string setting: saved after typing stops and when
- * the field loses focus. `toValue` converts the text before it is stored.
+ * the field loses focus. `toValue` converts the text before it is stored;
+ * `secret` hides what is typed, like a password.
  */
-export function boundText(model, path, { labelledBy, label, placeholder, mono, narrow, toValue, fromValue } = {}) {
+export function boundText(
+  model,
+  path,
+  { labelledBy, label, placeholder, mono, narrow, secret, toValue, fromValue } = {},
+) {
   const read = () => (fromValue ? fromValue(model.get(path)) : model.get(path) ?? '');
   const input = h('input', {
-    type: 'text',
+    type: secret ? 'password' : 'text',
     class: ['field', mono ? 'field--mono' : '', narrow ? 'field--narrow' : ''].join(' ').trim(),
     placeholder,
     spellcheck: 'false',
