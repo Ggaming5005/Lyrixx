@@ -1,0 +1,77 @@
+name: Release
+
+# Builds the Lyrix installers for Windows, macOS and Linux into a draft
+# GitHub release. Publish the draft by hand once it looks right.
+#
+# Pushing a tag `vX.Y.Z` fills the draft for that tag. A run started by hand
+# (Run workflow) is a trial: it fills a draft of its own, tagged
+# `vX.Y.Z-manual.<run number>`, and never touches the release of `vX.Y.Z`,
+# whose installers it would otherwise replace even once published.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+          - platform: macos-latest
+            # One app for Apple silicon and Intel Macs.
+            args: "--target universal-apple-darwin"
+          # The oldest Ubuntu runner: the binaries, and the libraries the
+          # AppImage carries, then need only its glibc (2.35), so they also
+          # run on Ubuntu 22.04, Debian 12 and Mint 21.
+          - platform: ubuntu-22.04
+            args: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app/desktop
+          tauriScript: npx --yes @tauri-apps/cli@2
+          args: ${{ matrix.args }}
+          # The pushed tag, or (run by hand) a trial tag of the run's own: the
+          # action reuses any release with the same tag, published or not.
+          tagName: ${{ github.event_name == 'push' && github.ref_name || format('v__VERSION__-manual.{0}', github.run_number) }}
+          releaseName: ${{ github.event_name == 'push' && 'Lyrix v__VERSION__' || format('Lyrix v__VERSION__ (manual build {0})', github.run_number) }}
+          releaseBody: |
+            Lyrix shows the lyric line you're hearing as your Discord status.
+
+            - Windows: download the `-setup.exe` and run it.
+            - macOS: download the `.dmg`, open it and drag Lyrix to Applications.
+            - Linux: download the `.AppImage` (make it executable and run it) or the `.deb`.
+
+            The app is not code-signed yet, so Windows and macOS may warn the first time you open it.
+          releaseDraft: true
+          # A trial published by mistake never becomes the latest release.
+          prerelease: ${{ github.event_name != 'push' }}

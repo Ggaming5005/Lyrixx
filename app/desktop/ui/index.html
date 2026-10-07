@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Lyrix</title>
+    <link rel="icon" href="assets/logo.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="css/tokens.css" />
+    <link rel="stylesheet" href="css/base.css" />
+    <link rel="stylesheet" href="css/controls.css" />
+    <link rel="stylesheet" href="css/now.css" />
+    <link rel="stylesheet" href="css/pages.css" />
+    <script src="js/theme-boot.js"></script>
+    <script type="module" src="js/main.js"></script>
+  </head>
+  <body>
+    <div class="backdrop" aria-hidden="true">
+      <div class="backdrop-art"></div>
+      <div class="backdrop-scrim"></div>
+      <div class="backdrop-noise"></div>
+    </div>
+
+    <div class="drag-region" data-tauri-drag-region hidden></div>
+
+    <div class="shell">
+      <nav class="sidebar" aria-label="Lyrix">
+        <a class="wordmark" href="#now" aria-label="Lyrix, Now Playing">
+          <!-- Same drawing as assets/wordmark.svg, inline so the letters follow the theme. -->
+          <svg class="wordmark-full" viewBox="0 0 392 140" width="84" height="30" aria-hidden="true" focusable="false">
+            <defs>
+              <linearGradient id="wordmark-bg" x1="0.12" y1="0" x2="0.88" y2="1">
+                <stop offset="0" stop-color="#FF9A4D" />
+                <stop offset="0.48" stop-color="#F43F7A" />
+                <stop offset="1" stop-color="#7448FF" />
+              </linearGradient>
+            </defs>
+            <rect x="0" y="4" width="112" height="112" rx="26" fill="url(#wordmark-bg)" />
+            <g transform="translate(-8 -4) scale(0.125)">
+              <path d="M440 296V650M440 296H740M562 416H722M562 536H652" fill="none" stroke="#fff" stroke-width="76" stroke-linecap="round" />
+              <ellipse cx="364" cy="668" rx="112" ry="90" transform="rotate(-20 364 668)" fill="#fff" />
+            </g>
+            <g transform="translate(140 12)" fill="none" stroke="currentColor" stroke-width="15" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M7.5 7.5V92.5H50" />
+              <path d="M68 35.5 91 92M114 35.5 79.6 120" />
+              <path d="M136 92.5V35.5M136 61C136 44 146 35.5 164 35.5" />
+              <path d="M186 92.5V35.5" />
+              <path d="M206 35.5 242 92.5M242 35.5 206 92.5" />
+              <circle cx="186" cy="11" r="9.5" fill="currentColor" stroke="none" />
+            </g>
+          </svg>
+          <img class="wordmark-mark-only" src="assets/logo.svg" alt="" width="32" height="32" />
+        </a>
+
+        <ul class="nav" role="list">
+          <li>
+            <a class="nav-item" href="#now" data-page="now" title="Now Playing">
+              <span data-icon="nowPlaying"></span><span class="nav-label">Now Playing</span>
+            </a>
+          </li>
+          <li>
+            <a class="nav-item" href="#lyrics" data-page="lyrics" title="Lyrics">
+              <span data-icon="lyrics"></span><span class="nav-label">Lyrics</span>
+            </a>
+          </li>
+          <li>
+            <a class="nav-item" href="#connections" data-page="connections" title="Connections">
+              <span data-icon="connections"></span><span class="nav-label">Connections</span>
+            </a>
+          </li>
+          <li>
+            <a class="nav-item" href="#settings" data-page="settings" title="Settings">
+              <span data-icon="settings"></span><span class="nav-label">Settings</span>
+            </a>
+          </li>
+        </ul>
+
+        <div class="sidebar-spacer"></div>
+
+        <div class="sidebar-foot">
+          <a class="nav-item nav-item--warn" href="#advanced" data-page="advanced" title="Advanced">
+            <span data-icon="warning"></span><span class="nav-label">Advanced</span>
+            <span class="nav-badge" id="advanced-badge" hidden title="Advanced mode is on"></span>
+          </a>
+
+          <div class="sharing" id="sharing">
+            <div class="sharing-head">
+              <span class="sharing-title" id="sharing-title"><span data-icon="broadcast"></span>Sharing</span>
+              <button type="button" class="switch" role="switch" id="sharing-switch" aria-checked="true" aria-labelledby="sharing-title" aria-describedby="sharing-detail" disabled></button>
+            </div>
+            <div class="sharing-detail"><span class="dot" id="sharing-dot"></span><span id="sharing-detail">Starting…</span></div>
+          </div>
+          <button type="button" class="sharing-rail-button" id="sharing-rail" aria-pressed="true" aria-label="Sharing" title="Sharing">
+            <span data-icon="broadcast"></span>
+          </button>
+        </div>
+      </nav>
+
+      <main class="content" id="content">
+        <section class="page page-now" id="page-now" data-page="now" aria-labelledby="now-title" hidden></section>
+        <section class="page" id="page-lyrics" data-page="lyrics" aria-label="Lyrics" hidden></section>
+        <section class="page" id="page-connections" data-page="connections" aria-label="Connections" hidden></section>
+        <section class="page" id="page-settings" data-page="settings" aria-label="Settings" hidden></section>
+        <section class="page" id="page-advanced" data-page="advanced" aria-label="Advanced" hidden></section>
+      </main>
+    </div>
+
+    <div class="toasts" role="status" aria-live="polite"></div>
+    <dialog class="modal" id="modal"></dialog>
+  </body>
+</html>

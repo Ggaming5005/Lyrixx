@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Shown when macOS asks whether Lyrix may talk to Spotify or Music
+       (AppleScript reads the song playing; without this text macOS refuses). -->
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Lyrix reads which song Spotify or Music is playing, so it can show its lyrics as your status.</string>
+</dict>
+</plist>

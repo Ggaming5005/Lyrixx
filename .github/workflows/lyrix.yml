@@ -1,0 +1,106 @@
+name: Lyrix app
+
+on:
+  push:
+    branches: [main]
+    paths: ["app/**", ".github/workflows/lyrix.yml"]
+  pull_request:
+    paths: ["app/**", ".github/workflows/lyrix.yml"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: app
+    shell: bash
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux builds on the oldest Ubuntu runner: the binaries, and the
+        # libraries the AppImage carries, then need only its glibc (2.35),
+        # so they also run on Ubuntu 22.04, Debian 12 and Mint 21.
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          # macOS builds one app for Apple silicon and Intel Macs.
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build the installers
+        working-directory: app/desktop
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            npx --yes @tauri-apps/cli@2 build --target universal-apple-darwin
+          else
+            npx --yes @tauri-apps/cli@2 build
+          fi
+      - name: Build the command
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            cargo build --release -p lyrix --target aarch64-apple-darwin
+            cargo build --release -p lyrix --target x86_64-apple-darwin
+            mkdir -p target/release
+            lipo -create -output target/release/lyrix \
+              target/aarch64-apple-darwin/release/lyrix target/x86_64-apple-darwin/release/lyrix
+          else
+            cargo build --release -p lyrix
+          fi
+
+      - name: Upload the Windows installer
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lyrix-Windows
+          path: app/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+      - name: Upload the macOS disk image
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lyrix-macOS
+          path: app/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+      - name: Upload the Linux packages
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lyrix-Linux
+          path: |
+            app/target/release/bundle/appimage/*.AppImage
+            app/target/release/bundle/deb/*.deb
+          if-no-files-found: error
+      - name: Upload the command
+        uses: actions/upload-artifact@v4
+        with:
+          name: lyrix-cli-${{ runner.os }}
+          path: |
+            app/target/release/lyrix
+            app/target/release/lyrix.exe
+          if-no-files-found: error

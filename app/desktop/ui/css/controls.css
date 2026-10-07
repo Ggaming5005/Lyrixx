@@ -1,0 +1,827 @@
+/* Buttons, switches, fields, grouped lists, badges, toast and modal. */
+
+/* ---------------------------------------------------------------------------
+   Buttons
+   --------------------------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  height: 32px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-strong);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.btn:hover {
+  background: var(--surface-press);
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btn:disabled {
+  cursor: default;
+  opacity: 0.45;
+  transform: none;
+}
+
+.btn--primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--on-accent);
+  transition:
+    background-color 600ms ease,
+    transform var(--dur-fast) var(--ease),
+    filter var(--dur-fast) var(--ease);
+}
+
+.btn--primary:hover {
+  background: var(--accent);
+  filter: brightness(1.08);
+}
+
+.btn--ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-2);
+}
+
+.btn--ghost:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.btn--danger {
+  border-color: transparent;
+  background: var(--danger);
+  color: #fff;
+}
+
+.btn--danger:hover {
+  background: var(--danger);
+  filter: brightness(1.08);
+}
+
+.btn--lg {
+  height: 40px;
+  padding: 0 var(--sp-4);
+  border-radius: var(--r-lg);
+  font-size: var(--fs-body);
+}
+
+.icon-btn {
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-2);
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.icon-btn:hover {
+  background: var(--surface-strong);
+  color: var(--text);
+}
+
+.icon-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+.link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--accent);
+  font-weight: 600;
+  transition: color 600ms ease;
+}
+
+.link-btn:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.link-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ---------------------------------------------------------------------------
+   Switch (button role="switch")
+   --------------------------------------------------------------------------- */
+
+.switch {
+  position: relative;
+  width: 40px;
+  height: 24px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--switch-off);
+  box-shadow: inset 0 0 0 1px var(--border);
+  transition:
+    background-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease);
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.35);
+  transition: transform var(--dur) var(--ease-out);
+}
+
+.switch[aria-checked="true"] {
+  background: var(--accent);
+  box-shadow: none;
+}
+
+.switch[aria-checked="true"]::after {
+  transform: translateX(16px);
+}
+
+.switch:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.switch:focus-visible {
+  box-shadow: var(--focus);
+}
+
+.switch--danger[aria-checked="true"] {
+  background: var(--danger);
+}
+
+/* ---------------------------------------------------------------------------
+   Fields
+   --------------------------------------------------------------------------- */
+
+.field {
+  width: 100%;
+  height: 36px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--field-border);
+  border-radius: var(--r-md);
+  background: var(--field);
+  font-size: var(--fs-body);
+  -webkit-user-select: text;
+  user-select: text;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.field::placeholder {
+  color: var(--text-4);
+}
+
+.field:hover {
+  border-color: var(--border);
+}
+
+.field:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.field[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.field--mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+}
+
+.field--narrow {
+  width: 220px;
+}
+
+/* Number stepper: − value + */
+
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  border: 1px solid var(--field-border);
+  border-radius: var(--r-md);
+  background: var(--field);
+}
+
+.stepper button {
+  display: grid;
+  width: 32px;
+  height: 30px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-2);
+}
+
+.stepper button:hover {
+  background: var(--surface-strong);
+  color: var(--text);
+}
+
+.stepper button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.stepper button:disabled,
+.icon-btn:disabled {
+  cursor: default;
+  opacity: 0.4;
+  background: transparent;
+  color: var(--text-2);
+}
+
+.stepper-value {
+  min-width: 76px;
+  padding: 0 var(--sp-1);
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  text-align: center;
+}
+
+/* Tag input */
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 4px;
+  border: 1px solid var(--field-border);
+  border-radius: var(--r-md);
+  background: var(--field);
+  cursor: text;
+}
+
+.tags:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.tag-list {
+  display: contents;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 26px;
+  padding: 0 4px 0 10px;
+  border-radius: var(--r-sm);
+  background: var(--surface-strong);
+  font-size: var(--fs-small);
+  font-weight: 500;
+}
+
+.tag button {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-3);
+}
+
+.tag button:hover {
+  background: var(--surface-press);
+  color: var(--text);
+}
+
+.tag button svg {
+  width: 12px;
+  height: 12px;
+}
+
+.tags input {
+  min-width: 120px;
+  height: 26px;
+  flex: 1;
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+  font-size: var(--fs-small);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.tags input::placeholder {
+  color: var(--text-4);
+}
+
+/* ---------------------------------------------------------------------------
+   Chips and badges
+   --------------------------------------------------------------------------- */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--surface-strong);
+  color: var(--text-2);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chip svg {
+  width: 14px;
+  height: 14px;
+}
+
+.chip--warn {
+  background: var(--warn-surface);
+  color: var(--warn-text);
+}
+
+.chip--button {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.chip--button:hover {
+  background: var(--surface-press);
+  color: var(--text);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--surface-strong);
+  color: var(--text-3);
+  font-size: var(--fs-overline);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.badge--accent {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.badge--warn {
+  background: var(--warn-surface);
+  color: var(--warn-text);
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--idle);
+}
+
+.dot[data-tone="ok"] {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-glow);
+}
+
+.dot[data-tone="warn"] {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px var(--warn-glow);
+}
+
+.dot[data-tone="danger"] {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-glow);
+}
+
+/* ---------------------------------------------------------------------------
+   Grouped lists (the settings look)
+   --------------------------------------------------------------------------- */
+
+.group + .group {
+  margin-top: var(--sp-8);
+}
+
+.group-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0 0 var(--sp-2) var(--sp-1);
+  color: var(--text-2);
+  font-size: var(--fs-small);
+  font-weight: 600;
+}
+
+.group-title svg {
+  width: 16px;
+  height: 16px;
+  color: var(--text-3);
+}
+
+.group-body {
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+}
+
+.group-note {
+  margin: var(--sp-2) var(--sp-1) 0;
+  color: var(--text-3);
+  font-size: var(--fs-caption);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-height: 56px;
+  padding: var(--sp-3) var(--sp-4);
+}
+
+.row + .row,
+.row-extra + .row {
+  border-top: 1px solid var(--hairline);
+}
+
+.row--stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sp-3);
+}
+
+.row-lead {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  place-items: center;
+  border-radius: var(--r-md);
+  background: var(--surface-strong);
+  color: var(--text-2);
+}
+
+.row-lead--danger {
+  background: var(--danger-surface);
+  color: var(--danger);
+}
+
+.row-lead svg {
+  width: 18px;
+  height: 18px;
+}
+
+.row-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.row-title {
+  font-size: var(--fs-body);
+  font-weight: 500;
+}
+
+.row-desc {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: var(--fs-caption);
+  line-height: 1.45;
+}
+
+.row-desc code,
+.prose code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-strong);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.row-control {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+
+.row-extra {
+  padding: 0 var(--sp-4) var(--sp-4) calc(var(--sp-4) + 32px + var(--sp-4));
+}
+
+/* Content under a row with a leading icon lines up with the row's text. */
+.row--stack.has-lead > :not(.row-head) {
+  margin-left: calc(32px + var(--sp-4));
+}
+
+.row-extra-label {
+  margin: 0 0 var(--sp-2);
+}
+
+.row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.path {
+  overflow: hidden;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.issue {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: var(--sp-2);
+  color: var(--warn-text);
+  font-size: var(--fs-caption);
+  font-weight: 500;
+}
+
+.issue[data-severity="error"] {
+  color: var(--danger-text);
+}
+
+.issue svg {
+  width: 14px;
+  height: 14px;
+  margin-top: 1px;
+}
+
+/* Disclosure */
+
+.disclosure > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-height: 52px;
+  padding: var(--sp-3) var(--sp-4);
+  cursor: pointer;
+  list-style: none;
+}
+
+.disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.disclosure > summary:hover {
+  background: var(--surface);
+}
+
+.disclosure > summary:focus-visible {
+  border-radius: var(--r-lg);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.disclosure-chevron {
+  margin-left: auto;
+  color: var(--text-3);
+  transition: transform var(--dur) var(--ease);
+}
+
+.disclosure[open] .disclosure-chevron {
+  transform: rotate(90deg);
+}
+
+.disclosure-body {
+  padding: 0 var(--sp-4) var(--sp-4);
+}
+
+/* ---------------------------------------------------------------------------
+   Toast
+   --------------------------------------------------------------------------- */
+
+.toasts {
+  position: fixed;
+  bottom: var(--sp-6);
+  left: calc(var(--sidebar-w) + (100vw - var(--sidebar-w)) / 2);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  max-width: 420px;
+  padding: 9px 14px 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  box-shadow: var(--shadow-pop);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  backdrop-filter: blur(20px) saturate(1.4);
+  animation: toast-in var(--dur-slow) var(--ease-out);
+}
+
+.toast svg {
+  width: 16px;
+  height: 16px;
+  color: var(--ok);
+}
+
+.toast[data-tone="error"] svg {
+  color: var(--danger);
+}
+
+.toast.is-leaving {
+  opacity: 0;
+  transform: translateY(6px) scale(0.98);
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Modal (<dialog>)
+   --------------------------------------------------------------------------- */
+
+.modal {
+  width: min(440px, calc(100vw - 48px));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  background: var(--raised);
+  box-shadow: var(--shadow-pop);
+  color: var(--text);
+  -webkit-backdrop-filter: blur(30px) saturate(1.4);
+  backdrop-filter: blur(30px) saturate(1.4);
+}
+
+.modal[open] {
+  animation: modal-in var(--dur-slow) var(--ease-out);
+}
+
+/* Without <dialog> support (Safari before 15.4) it would show inline. */
+.modal:not([open]) {
+  display: none;
+}
+
+.modal::backdrop {
+  background: rgb(6 4 10 / 0.5);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+
+/* The stand-in for showModal() where it is missing (controls.js openModal). */
+.modal-backdrop {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 900;
+  background: rgb(6 4 10 / 0.5);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+
+.modal--fallback {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 901;
+  display: block;
+  max-height: calc(100vh - 48px);
+  margin: 0;
+  overflow: auto;
+  transform: translate(-50%, -50%);
+}
+
+.modal--fallback[open] {
+  animation: none;
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.97);
+  }
+}
+
+.modal-body {
+  padding: var(--sp-6) var(--sp-6) var(--sp-5);
+}
+
+.modal-icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  margin-bottom: var(--sp-4);
+  border-radius: var(--r-lg);
+  background: var(--danger-surface);
+  color: var(--danger);
+}
+
+.modal-icon svg {
+  width: 24px;
+  height: 24px;
+}
+
+.modal-title {
+  font-family: var(--font-display);
+  font-size: var(--fs-title-sm);
+  font-weight: 700;
+}
+
+.modal-text {
+  margin-top: var(--sp-2);
+  color: var(--text-2);
+}
+
+.modal-warning {
+  margin-top: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--r-md);
+  background: var(--danger-surface);
+  color: var(--danger-text);
+  font-size: var(--fs-small);
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-6) var(--sp-6);
+}
